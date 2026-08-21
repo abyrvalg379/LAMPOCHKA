@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "lampochka"
+version = "2.0.0"
+name = "LAMPOCHKA"
+tagline = "Manage all lights in the scene"
+maintainer = "Maksim Kovalev <maksim@example.com>"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Import/export lights"
