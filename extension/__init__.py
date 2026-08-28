@@ -711,6 +711,9 @@ class LM_PT_MainPanel(bpy.types.Panel):
         op = row.operator("light_manager.toggle_render", text="",
                           icon='RESTRICT_RENDER_OFF' if not obj.hide_render else 'RESTRICT_RENDER_ON')
         op.index = full_idx
+        # Delete this light (same trash button as in the settings)
+        op = row.operator("light_manager.delete_light_row", text="", icon='TRASH')
+        op.index = full_idx
 
         # Settings (only if gear clicked)
         if settings_open:
@@ -1054,6 +1057,27 @@ class LM_OT_delete_light(bpy.types.Operator):
     def execute(self, context):
         obj = context.active_object
         if obj and obj.type == 'LIGHT':
+            bpy.data.objects.remove(obj, do_unlink=True)
+        return {'FINISHED'}
+
+
+class LM_OT_delete_light_row(bpy.types.Operator):
+    """Delete this light."""
+    bl_idname = "light_manager.delete_light_row"
+    bl_label = "Delete Light"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    index: IntProperty()
+
+    def execute(self, context):
+        lights = get_scene_lights(context)
+        if 0 <= self.index < len(lights):
+            obj = lights[self.index]
+            settings = context.scene.lm_settings
+            if settings.settings_light == obj.name:
+                settings.settings_light = ""
+            if settings.selected_index >= len(lights) - 1:
+                settings.selected_index = -1
             bpy.data.objects.remove(obj, do_unlink=True)
         return {'FINISHED'}
 
@@ -1429,6 +1453,7 @@ classes = (
     LM_OT_toggle_all_render,
     LM_OT_add_light,
     LM_OT_delete_light,
+    LM_OT_delete_light_row,
     LM_OT_duplicate_light,
     LM_OT_move_light,
     LM_OT_toggle_settings,

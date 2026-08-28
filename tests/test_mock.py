@@ -81,9 +81,10 @@ class FakeNode:
 class FakeObj:
     """Object with dict-style ID props (ob["key"]) like real Blender."""
 
-    def __init__(self, otype, data=None):
+    def __init__(self, otype, data=None, name="Object"):
         self.type = otype
         self.data = data
+        self.name = name
         self._props = {}
 
     def get(self, key, default=None):
@@ -840,6 +841,36 @@ check("shift_rmb: keymap removed on unregister",
 bpy.context = types.SimpleNamespace()  # no window_manager
 ns["unregister_shift_rmb_keymap"]()
 check("shift_rmb: no keyconfig -> no crash", True)
+
+# ---------------------------------------------------------------- delete light row
+removed = []
+bpy.data.objects = types.SimpleNamespace(remove=lambda o, do_unlink=False: removed.append(o))
+del_scene = types.SimpleNamespace(
+    objects=[FakeObj('LIGHT', name="L1"), FakeObj('LIGHT', name="L2"),
+             FakeObj('LIGHT', name="L3")],
+    lm_settings=types.SimpleNamespace(settings_light="", selected_index=1))
+bpy.context = types.SimpleNamespace(scene=del_scene)
+
+
+class DelRowOp(ns["LM_OT_delete_light_row"]):
+    pass
+
+
+dr = DelRowOp()
+dr.index = 1
+rv = dr.execute(bpy.context)
+check("delete row FINISHED, correct object removed",
+      rv == {'FINISHED'} and len(removed) == 1 and removed[0].name == "L2")
+dr.index = 99
+rv = dr.execute(bpy.context)
+check("delete row out of range -> FINISHED, no crash",
+      rv == {'FINISHED'} and len(removed) == 1)
+del_scene.lm_settings.settings_light = "L1"
+dr.index = 0
+dr.execute(bpy.context)
+check("delete row clears open settings of deleted light",
+      del_scene.lm_settings.settings_light == "")
+bpy.data.objects = None
 
 # ---------------------------------------------------------------- unregister
 try:

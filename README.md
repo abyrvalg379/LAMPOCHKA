@@ -21,6 +21,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 ### Visibility Controls
 - 👁 — toggle viewport visibility per light
 - 📷 — toggle render visibility per light
+- ✕ — delete the light right from the row (Ctrl+Z friendly)
 - Global toggle all visibility / render from header
 
 ### Inline Settings (via ⚙)
