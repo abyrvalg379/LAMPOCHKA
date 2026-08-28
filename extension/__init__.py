@@ -8,6 +8,7 @@ import math
 import os
 
 import bpy
+from mathutils import Vector
 from bpy.props import (
     StringProperty,
     IntProperty,
@@ -15,6 +16,7 @@ from bpy.props import (
     FloatProperty,
     FloatVectorProperty,
     EnumProperty,
+    PointerProperty,
 )
 from bpy.types import AddonPreferences, PropertyGroup
 from bpy.app.handlers import persistent
@@ -617,6 +619,255 @@ class LM_IESSettings(PropertyGroup):
         items=ies_enum_items,
         description="IES files found in the folder",
     )
+
+
+# ---------------------------------------------------------------------------
+#  Sun helper — aim a sun light by time & location (NOAA algorithm, public domain)
+# ---------------------------------------------------------------------------
+
+def _julian_day(year, month, day, hour_utc):
+    a = (14 - month) // 12
+    y = year + 4800 - a
+    m = month + 12 * a - 3
+    jdn = day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
+    return jdn + (hour_utc - 12.0) / 24.0
+
+
+def sun_azimuth_elevation(year, month, day, hour_local, latitude, longitude, utc_offset):
+    """Solar position (NOAA, public domain). hour_local = local clock time.
+    Returns (azimuth_deg, elevation_deg); azimuth measured from north, clockwise."""
+    jd = _julian_day(year, month, day, hour_local - utc_offset)
+    n = jd - 2451545.0
+
+    mean_lon = (280.460 + 0.9856474 * n) % 360.0
+    mean_anom = math.radians((357.528 + 0.9856003 * n) % 360.0)
+    ecl_lon = math.radians(mean_lon + 1.915 * math.sin(mean_anom)
+                           + 0.020 * math.sin(2.0 * mean_anom))
+    obliq = math.radians(23.439 - 0.0000004 * n)
+
+    alpha = math.atan2(math.cos(obliq) * math.sin(ecl_lon), math.cos(ecl_lon))
+    decl = math.asin(math.sin(obliq) * math.sin(ecl_lon))
+
+    gmst = (280.46061837 + 360.98564736629 * n) % 360.0
+    ha = math.radians(((gmst + longitude - math.degrees(alpha) + 180.0) % 360.0) - 180.0)
+
+    lat = math.radians(latitude)
+    cos_zen = (math.sin(lat) * math.sin(decl)
+               + math.cos(lat) * math.cos(decl) * math.cos(ha))
+    cos_zen = max(-1.0, min(1.0, cos_zen))
+    elevation = 90.0 - math.degrees(math.acos(cos_zen))
+
+    az = math.atan2(math.sin(ha),
+                    math.cos(ha) * math.sin(lat) - math.tan(decl) * math.cos(lat))
+    azimuth = (math.degrees(az) + 180.0) % 360.0
+    return azimuth, elevation
+
+
+def _day_declination(year, month, day):
+    """Sun declination at local noon (radians) + equation of time (minutes)."""
+    jd = _julian_day(year, month, day, 12.0)
+    n = jd - 2451545.0
+    mean_lon = (280.460 + 0.9856474 * n) % 360.0
+    mean_anom = math.radians((357.528 + 0.9856003 * n) % 360.0)
+    ecl_lon = math.radians(mean_lon + 1.915 * math.sin(mean_anom)
+                           + 0.020 * math.sin(2.0 * mean_anom))
+    obliq = math.radians(23.439 - 0.0000004 * n)
+    alpha = math.degrees(math.atan2(math.cos(obliq) * math.sin(ecl_lon),
+                                    math.cos(ecl_lon)))
+    decl = math.asin(math.sin(obliq) * math.sin(ecl_lon))
+    eq_time_min = 4.0 * ((mean_lon - alpha + 180.0) % 360.0 - 180.0)
+    return decl, eq_time_min
+
+
+def _sunrise_sunset(year, month, day, latitude, longitude, utc_offset):
+    """Return (sunrise_hours, sunset_hours) in local clock time, or (None, None)."""
+    decl, eq_time_min = _day_declination(year, month, day)
+    lat = math.radians(latitude)
+    cos_ha0 = ((math.cos(math.radians(90.833)) - math.sin(lat) * math.sin(decl))
+               / (math.cos(lat) * math.cos(decl)))
+    if not -1.0 <= cos_ha0 <= 1.0:
+        return None, None  # polar day/night
+    ha0_min = 4.0 * math.degrees(math.acos(cos_ha0))
+    solar_noon_utc = 720.0 - 4.0 * longitude - eq_time_min
+    rise = (solar_noon_utc - ha0_min) / 60.0 + utc_offset
+    set_ = (solar_noon_utc + ha0_min) / 60.0 + utc_offset
+    return rise % 24.0, set_ % 24.0
+
+
+def _format_hours(hours):
+    if hours is None or hours < 0:
+        return "—"
+    h = int(hours)
+    m = int(round((hours - h) * 60))
+    if m == 60:
+        h, m = h + 1, 0
+    return "%02d:%02d" % (h % 24, m)
+
+
+def lm_sun_update(self, context):
+    """Recompute position data and aim the sun object."""
+    az, el, az_rad, el_rad = _lm_sun_dir(self)
+
+    rise, set_ = _sunrise_sunset(self.year, self.month, self.day,
+                                 self.latitude, self.longitude, self.utc_offset)
+    self["sun_elevation"] = el
+    self["sun_azimuth"] = az
+    self["sunrise"] = rise if rise is not None else -1.0
+    self["sunset"] = set_ if set_ is not None else -1.0
+
+    obj = self.sun_object
+    if obj is None or obj.type != 'LIGHT':
+        return
+    direction = Vector((math.sin(az_rad) * math.cos(el_rad),
+                        math.cos(az_rad) * math.cos(el_rad),
+                        math.sin(el_rad)))
+    rot = (-direction).to_track_quat('-Z', 'Y').to_euler()
+    if obj.data is not None and obj.data.type == 'SUN':
+        # Sun light is directional — placement doesn't affect anything,
+        # moving it would only confuse the user
+        obj.rotation_euler = rot
+    else:
+        obj.location = direction * self.sun_distance
+        obj.rotation_euler = rot
+
+
+def _lm_sun_dir(props):
+    az, el = sun_azimuth_elevation(
+        props.year, props.month, props.day, props.time_hours,
+        props.latitude, props.longitude, props.utc_offset)
+    az = (az + props.north_offset) % 360.0
+    return az, el, math.radians(az), math.radians(el)
+
+
+def _sun_elev_get(self):
+    return self.get("sun_elevation", 0.0)
+
+
+class LM_SunSettings(PropertyGroup):
+    sun_object: PointerProperty(
+        name="Sun",
+        type=bpy.types.Object,
+        description="Sun light to aim",
+    )
+    time_hours: FloatProperty(
+        name="Time", min=0.0, max=24.0, default=12.0, subtype='TIME',
+        update=lm_sun_update,
+        description="Local time of day — keyframe it to animate the day")
+    day: IntProperty(name="Day", min=1, max=31, default=21, update=lm_sun_update)
+    month: IntProperty(name="Month", min=1, max=12, default=6, update=lm_sun_update)
+    year: IntProperty(name="Year", min=1900, max=2100, default=2026,
+                      update=lm_sun_update)
+    latitude: FloatProperty(name="Latitude", min=-90.0, max=90.0, default=55.75,
+                            update=lm_sun_update,
+                            description="Degrees; positive is north")
+    longitude: FloatProperty(name="Longitude", min=-180.0, max=180.0, default=37.62,
+                             update=lm_sun_update,
+                             description="Degrees; positive is east")
+    utc_offset: FloatProperty(name="UTC Offset", min=-12.0, max=14.0, default=3.0,
+                              update=lm_sun_update,
+                              description="Time zone offset from UTC in hours")
+    north_offset: FloatProperty(
+        name="North Offset", min=0.0, max=360.0, default=0.0, subtype='ANGLE',
+        update=lm_sun_update,
+        description="Rotate the whole setup: where north is in the scene")
+    sun_distance: FloatProperty(
+        name="Distance", min=0.1, default=100.0, unit='LENGTH',
+        update=lm_sun_update,
+        description="Placement of non-sun lights; sun lamps only rotate")
+    # read-only computed values (written by lm_sun_update)
+    sun_elevation: FloatProperty(get=_sun_elev_get)
+    sun_azimuth: FloatProperty(get=lambda self: self.get("sun_azimuth", 0.0))
+    sunrise: FloatProperty(get=lambda self: self.get("sunrise", -1.0))
+    sunset: FloatProperty(get=lambda self: self.get("sunset", -1.0))
+
+
+@persistent
+def sun_frame_handler(scene):
+    """Re-aim the sun on frame changes — animates the day when Time is keyed."""
+    try:
+        if bpy.app.is_job_running("RENDER") or bpy.app.is_job_running("OBJECT_BAKE"):
+            return
+        props = scene.lm_sun
+        if props.sun_object is not None:
+            lm_sun_update(props, None)
+    except Exception:
+        pass
+
+
+class LM_OT_sun_preset(bpy.types.Operator):
+    """Set the time to a classic lighting moment."""
+    bl_idname = "light_manager.sun_preset"
+    bl_label = "Sun Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset: EnumProperty(
+        name="Preset",
+        items=[
+            ('NOON', "Noon", "Solar noon — 12:00"),
+            ('GOLDEN', "Golden Hour", "One hour before sunset"),
+            ('SUNSET', "Sunset", "The sunset moment"),
+        ],
+        default='NOON',
+    )
+
+    def execute(self, context):
+        props = context.scene.lm_sun
+        if self.preset == 'NOON':
+            props.time_hours = 12.0
+        else:
+            sunset = props.get("sunset", -1.0)
+            if sunset < 0:
+                self.report({'WARNING'}, "No sunset for this date/location")
+                return {'CANCELLED'}
+            props.time_hours = sunset if self.preset == 'SUNSET' else (sunset - 1.0) % 24.0
+        return {'FINISHED'}
+
+
+class LM_PT_SunPanel(bpy.types.Panel):
+    bl_label = "Sun"
+    bl_idname = "LM_PT_sun_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LAMPOCHKA"
+    bl_parent_id = "LM_PT_main_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        sun = context.scene.lm_sun
+
+        col = layout.column(align=True)
+        col.prop(sun, "sun_object")
+
+        col = layout.column(align=True)
+        col.prop(sun, "time_hours", text="Time")
+        row = col.row(align=True)
+        row.prop(sun, "day")
+        row.prop(sun, "month")
+        row.prop(sun, "year")
+        row = col.row(align=True)
+        row.prop(sun, "latitude")
+        row.prop(sun, "longitude")
+        row = col.row(align=True)
+        row.prop(sun, "utc_offset")
+        row.prop(sun, "north_offset")
+        col.prop(sun, "sun_distance")
+
+        row = layout.row(align=True)
+        row.operator("light_manager.sun_preset", text="Noon").preset = 'NOON'
+        row.operator("light_manager.sun_preset", text="Golden").preset = 'GOLDEN'
+        row.operator("light_manager.sun_preset", text="Sunset").preset = 'SUNSET'
+
+        col = layout.column(align=True)
+        col.label(text="Elevation: %.1f°   Azimuth: %.1f°"
+                  % (sun.sun_elevation, sun.sun_azimuth))
+        col.label(text="Sunrise %s   Sunset %s"
+                  % (_format_hours(sun.sunrise), _format_hours(sun.sunset)))
+
+        box = layout.box()
+        col = box.column(align=True)
+        col.label(text="Animate: keyframe Time —", icon='ANIM')
+        col.label(text="the sun follows every frame")
 
 
 # ---------------------------------------------------------------------------
@@ -1445,6 +1696,7 @@ classes = (
     LM_SceneSettings,
     LM_HDRISettings,
     LM_IESSettings,
+    LM_SunSettings,
     LM_AddonPreferences,
     LM_OT_select_light,
     LM_OT_toggle_visibility,
@@ -1468,9 +1720,11 @@ classes = (
     LM_OT_ies_pick_folder,
     LM_OT_ies_apply,
     LM_OT_ies_remove,
+    LM_OT_sun_preset,
     LM_PT_MainPanel,
     LM_PT_HDRIPanel,
     LM_PT_IESPanel,
+    LM_PT_SunPanel,
 )
 
 
@@ -1481,6 +1735,7 @@ def register():
     bpy.types.Scene.lm_settings = bpy.props.PointerProperty(type=LM_SceneSettings)
     bpy.types.Scene.lm_hdri = bpy.props.PointerProperty(type=LM_HDRISettings)
     bpy.types.Scene.lm_ies = bpy.props.PointerProperty(type=LM_IESSettings)
+    bpy.types.Scene.lm_sun = bpy.props.PointerProperty(type=LM_SunSettings)
     # Per-object Kelvin controls (stored as ID props on the light object)
     bpy.types.Object.lm_use_temperature = bpy.props.BoolProperty(
         name="Kelvin",
@@ -1504,6 +1759,9 @@ def register():
     # Register load handler (remembered HDRI/IES folders)
     if load_post_handler not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(load_post_handler)
+    # Sun animation: re-aim on frame changes
+    if sun_frame_handler not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(sun_frame_handler)
     if _hdri_pcoll is None:
         _hdri_pcoll = bpy.utils.previews.new()
     if _ies_pcoll is None:
@@ -1522,6 +1780,9 @@ def unregister():
     # Remove load handler
     if load_post_handler in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(load_post_handler)
+    # Remove sun frame handler
+    if sun_frame_handler in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(sun_frame_handler)
     if _hdri_pcoll is not None:
         bpy.utils.previews.remove(_hdri_pcoll)
         _hdri_pcoll = None
@@ -1539,6 +1800,10 @@ def unregister():
         pass
     try:
         del bpy.types.Scene.lm_ies
+    except Exception:
+        pass
+    try:
+        del bpy.types.Scene.lm_sun
     except Exception:
         pass
     try:

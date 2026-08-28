@@ -68,6 +68,14 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 `Preferences → Add-ons / Get Extensions → LAMPOCHKA → Default HDRI Folder`.
 Picking a folder in the panel updates it automatically; you can also edit it there manually.
 
+### Sun (v2.5)
+- Collapsible **Sun** sub-panel: aim any sun light by time of day, date and location
+- Time / date / latitude / longitude / UTC offset / north offset / distance
+- Presets: **Noon**, **Golden Hour** (one hour before sunset), **Sunset**
+- Read-out of elevation, azimuth, sunrise and sunset times
+- **Day animation**: keyframe the *Time* property — the sun follows every frame (paused during renders/bakes)
+- Solar position computed with the public-domain NOAA algorithm
+
 ### IES Browser (v2.3)
 - Collapsible **IES** sub-panel below the light list
 - Pick a folder — all `.ies` files appear as a grid (thumbnails are picked up from a `thumbnails/` subfolder if present, like `thumbnails/<name>.jpg`)

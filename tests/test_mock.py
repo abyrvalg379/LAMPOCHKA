@@ -238,11 +238,13 @@ bpy.utils.previews = types.SimpleNamespace(
     remove=lambda p: None,
 )
 
-_handlers = {"deps": [], "load": []}
+_handlers = {"deps": [], "load": [], "frame": []}
 bpy.app = types.ModuleType("bpy.app")
 bpy.app.handlers = types.ModuleType("bpy.app.handlers")
 bpy.app.handlers.depsgraph_update_post = _handlers["deps"]
 bpy.app.handlers.load_post = _handlers["load"]
+bpy.app.handlers.frame_change_post = _handlers["frame"]
+bpy.app.is_job_running = lambda name: False
 
 
 def persistent(fn):
@@ -257,8 +259,32 @@ io_utils = types.ModuleType("bpy_extras.io_utils")
 io_utils.ImportHelper = type("ImportHelper", (), {})
 bpy_extras.io_utils = io_utils
 
+mathutils = types.ModuleType("mathutils")
+
+
+class FakeQuat:
+    def to_euler(self):
+        return (0.0, 0.0, 0.0)
+
+
+class FakeVec:
+    def __init__(self, xyz):
+        self.xyz = tuple(float(c) for c in xyz)
+
+    def __mul__(self, s):
+        return FakeVec([c * s for c in self.xyz])
+
+    def __neg__(self):
+        return FakeVec([-c for c in self.xyz])
+
+    def to_track_quat(self, track, up):
+        return FakeQuat()
+
+
+mathutils.Vector = FakeVec
+
 for mod in (bpy, bpy.types, bpy.props, bpy.utils, bpy.app, bpy.app.handlers,
-            bpy_extras, io_utils):
+            bpy_extras, io_utils, mathutils):
     sys.modules[mod.__name__] = mod
 
 # ---------------------------------------------------------------- exec module
@@ -321,11 +347,13 @@ check("all classes registered", len(_registered) == len(ns["classes"]),
 check("lm_settings pointer added", ns["LM_SceneSettings"] in _pointers)
 check("lm_hdri pointer added", ns["LM_HDRISettings"] in _pointers)
 check("lm_ies pointer added", ns["LM_IESSettings"] in _pointers)
+check("lm_sun pointer added", ns["LM_SunSettings"] in _pointers)
 check("object kelvin props added",
       hasattr(bpy.types.Object, "lm_use_temperature")
       and hasattr(bpy.types.Object, "lm_temperature"))
 check("sync handler appended", ns["sync_handler"] in _handlers["deps"])
 check("load_post handler appended", ns["load_post_handler"] in _handlers["load"])
+check("sun frame handler appended", ns["sun_frame_handler"] in _handlers["frame"])
 check("prefs class registered", "LM_AddonPreferences" in _registered)
 check("preview collection created", pcoll is _pcoll_holder[0])
 
@@ -871,6 +899,97 @@ dr.execute(bpy.context)
 check("delete row clears open settings of deleted light",
       del_scene.lm_settings.settings_light == "")
 bpy.data.objects = None
+
+# ---------------------------------------------------------------- sun helper
+az, el = ns["sun_azimuth_elevation"](2026, 6, 21, 12.0, 55.75, 37.62, 3.0)
+check("sun: Moscow June noon elevation ~57", 50.0 < el < 62.0, str(el))
+check("sun: Moscow June noon azimuth ~south", 150.0 < az < 195.0, str(az))
+az_w, el_w = ns["sun_azimuth_elevation"](2026, 12, 21, 12.0, 55.75, 37.62, 3.0)
+check("sun: Moscow December noon is low", el_w < 20.0, str(el_w))
+az_n, el_n = ns["sun_azimuth_elevation"](2026, 6, 21, 23.0, 55.75, 37.62, 3.0)
+check("sun: Moscow June night is below horizon", el_n < 0.0, str(el_n))
+
+rise, set_ = ns["_sunrise_sunset"](2026, 6, 21, 55.75, 37.62, 3.0)
+check("sun: sunrise plausible", rise is not None and 0.0 < rise < 5.0, str(rise))
+check("sun: sunset plausible", set_ is not None and 19.0 < set_ < 23.0, str(set_))
+check("sun: set after rise", rise is not None and set_ is not None and set_ > rise)
+check("sun: polar night -> None",
+      ns["_sunrise_sunset"](2026, 12, 21, 89.0, 0.0, 0.0) == (None, None))
+
+sun_obj = FakeObj('LIGHT', FakeLightData(), name="Sun")
+
+
+class SunProps:
+    """Stands in for an LM_SunSettings instance."""
+
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+        self._store = {}
+
+    def get(self, k, d=None):
+        return self._store.get(k, d)
+
+    def __setitem__(self, k, v):
+        self._store[k] = v
+
+    def __getitem__(self, k):
+        return self._store[k]
+
+
+sun_props = SunProps(
+    year=2026, month=6, day=21, time_hours=12.0,
+    latitude=55.75, longitude=37.62, utc_offset=3.0,
+    north_offset=0.0, sun_distance=100.0, sun_object=sun_obj)
+ns["lm_sun_update"](sun_props, None)
+check("sun update: computed elevation stored",
+      50.0 < sun_props.get("sun_elevation", -99) < 62.0)
+check("sun update: sunset stored", 19.0 < sun_props.get("sunset", -1) < 23.0)
+check("sun update: sun placed above horizon",
+      sun_obj.location.xyz[2] > 0.0)
+check("sun update: rotation aimed",
+      isinstance(sun_obj.rotation_euler, tuple))
+
+# SUN-type light: rotation only, location untouched
+sun_data = FakeLightData()
+sun_data.type = 'SUN'
+sun_obj2 = FakeObj('LIGHT', sun_data, name="Sun2")
+sun_obj2.location = FakeVecInit = (5.0, 5.0, 0.0)
+sun_props2 = SunProps(
+    year=2026, month=6, day=21, time_hours=12.0,
+    latitude=55.75, longitude=37.62, utc_offset=3.0,
+    north_offset=0.0, sun_distance=100.0, sun_object=sun_obj2)
+ns["lm_sun_update"](sun_props2, None)
+check("sun update: SUN lamp stays in place",
+      sun_obj2.location == (5.0, 5.0, 0.0))
+check("sun update: SUN lamp still rotated",
+      isinstance(sun_obj2.rotation_euler, tuple))
+
+# frame handler
+frame_scene = types.SimpleNamespace(lm_sun=sun_props)
+ns["sun_frame_handler"](frame_scene)
+check("sun frame handler: runs, sun still placed", sun_obj.location.xyz[2] > 0.0)
+no_sun = types.SimpleNamespace(lm_sun=types.SimpleNamespace(sun_object=None))
+ns["sun_frame_handler"](no_sun)
+check("sun frame handler: no sun object -> no crash", True)
+
+# presets
+class PresetOp(ns["LM_OT_sun_preset"]):
+    pass
+
+
+ps = PresetOp()
+pr = types.SimpleNamespace(lm_sun=FakeObj('X'))
+pr.lm_sun.get = lambda k, d=None: {"sunset": 21.5}.get(k, d)
+ps_ctx = types.SimpleNamespace(scene=pr)
+ps.preset = 'NOON'
+ps.execute(ps_ctx)
+check("sun preset noon -> 12:00", pr.lm_sun.time_hours == 12.0)
+ps.preset = 'SUNSET'
+ps.execute(ps_ctx)
+check("sun preset sunset -> sunset time", pr.lm_sun.time_hours == 21.5)
+ps.preset = 'GOLDEN'
+ps.execute(ps_ctx)
+check("sun preset golden -> sunset-1", pr.lm_sun.time_hours == 20.5)
 
 # ---------------------------------------------------------------- unregister
 try:
