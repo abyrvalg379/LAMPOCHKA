@@ -1,6 +1,12 @@
-# LAMPOCHKA v2.4
+# LAMPOCHKA
+
+![LAMPOCHKA](screen/LAMPOCHKA_cover.png)
 
 Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
+
+**Blender 3.6+ / 4.2+ · Author: Maksim Kovalev**
+
+---
 
 Instead of searching for lights in the Outliner or switching between objects, you get a dedicated panel with instant access to every light's settings — color, power, shadow, type-specific parameters, and transforms.
 
@@ -89,6 +95,8 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 ## Usage
 
 `View3D → Sidebar (N) → LAMPOCHKA`
+
+![Panel](screen/LAMPOCHKA_panel.png)
 
 ## Project Structure
 
