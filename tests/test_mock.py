@@ -215,7 +215,7 @@ bpy.types.AddonPreferences = type("AddonPreferences", (), {})
 bpy.props = types.ModuleType("bpy.props")
 bpy.props.StringProperty = lambda **kw: None
 bpy.props.IntProperty = lambda **kw: None
-bpy.props.BoolProperty = lambda **kw: None
+bpy.props.BoolProperty = lambda **kw: kw
 bpy.props.FloatProperty = lambda **kw: None
 bpy.props.FloatVectorProperty = lambda **kw: None
 bpy.props.EnumProperty = lambda **kw: kw          # keep kwargs for callback test
@@ -627,6 +627,125 @@ bpy.context = types.SimpleNamespace(
     scene=types.SimpleNamespace(), preferences=bpy.context.preferences)
 ns["load_post_handler"](None)
 check("load_post without lm_hdri -> no crash", True)
+
+# ---------------------------------------------------------------- shift+rmb rotate
+class FakeKMI:
+    def __init__(self, idname, ktype, value, shift):
+        self.idname = idname
+        self.type = ktype
+        self.value = value
+        self.shift = shift
+
+
+class FakeKeyMapItems:
+    def __init__(self):
+        self.items = []
+
+    def new(self, idname, ktype, value, **kw):
+        kmi = FakeKMI(idname, ktype, value, kw.get("shift", False))
+        self.items.append(kmi)
+        return kmi
+
+    def remove(self, kmi):
+        self.items.remove(kmi)
+
+
+class FakeKeyMap:
+    def __init__(self):
+        self.keymap_items = FakeKeyMapItems()
+
+
+class FakeKeyMaps:
+    def __init__(self):
+        self._maps = {}
+
+    def new(self, name, space_type=None):
+        if name not in self._maps:
+            self._maps[name] = FakeKeyMap()
+        return self._maps[name]
+
+    def get(self, name):
+        return self._maps.get(name)
+
+
+addon_kc = types.SimpleNamespace(keymaps=FakeKeyMaps())
+fake_window = types.SimpleNamespace(
+    cursor_modal_set=lambda c: None,
+    cursor_modal_restore=lambda: None,
+)
+
+_anns_h = ns["LM_HDRISettings"].__annotations__
+check("shift_rmb prop present",
+      isinstance(_anns_h.get("shift_rmb_rotate"), dict))
+
+# keymap registered explicitly (register() skips when no window_manager)
+bpy.context = types.SimpleNamespace(
+    window_manager=types.SimpleNamespace(keyconfigs=types.SimpleNamespace(addon=addon_kc)))
+ns["register_shift_rmb_keymap"]()
+km3d = addon_kc.keymaps.get("3D View")
+check("shift_rmb: keymap item added",
+      km3d is not None and len(km3d.keymap_items.items) == 1
+      and km3d.keymap_items.items[0].idname == "light_manager.hdri_shift_rmb"
+      and km3d.keymap_items.items[0].type == 'RIGHTMOUSE'
+      and km3d.keymap_items.items[0].shift is True)
+ns["register_shift_rmb_keymap"]()
+check("shift_rmb: no duplicate on re-register", len(km3d.keymap_items.items) == 1)
+
+rmb_scene = types.SimpleNamespace(
+    lm_hdri=types.SimpleNamespace(rotation=(0.2, 0.1, 0.5), shift_rmb_rotate=True))
+status_texts = []
+header_texts = []
+modal_added = []
+fake_wm = types.SimpleNamespace(modal_handler_add=lambda op: modal_added.append(op))
+fake_area = types.SimpleNamespace(header_text_set=lambda t: header_texts.append(t))
+bpy.context = types.SimpleNamespace(
+    scene=rmb_scene,
+    window=fake_window,
+    window_manager=fake_wm,
+    area=fake_area,
+    workspace=types.SimpleNamespace(status_text_set=lambda t: status_texts.append(t)))
+
+
+class RmbOp(ns["LM_OT_hdri_shift_rmb"]):
+    pass
+
+
+check("shift_rmb poll: on when toggled", RmbOp.poll(bpy.context) is True)
+rmb_scene.lm_hdri.shift_rmb_rotate = False
+check("shift_rmb poll: off when untoggled", RmbOp.poll(bpy.context) is False)
+rmb_scene.lm_hdri.shift_rmb_rotate = True
+
+
+def _ev(t, v='NONE', x=0, y=0):
+    return types.SimpleNamespace(type=t, value=v, mouse_x=x, mouse_y=y)
+
+
+rmb = RmbOp()
+rv = rmb.invoke(bpy.context, _ev('RIGHTMOUSE', 'PRESS', 500, 400))
+check("shift_rmb modal: invoke RUNNING + handler attached + status set",
+      rv == {'RUNNING_MODAL'} and modal_added == [rmb] and len(status_texts) == 1)
+rv = rmb.modal(bpy.context, _ev('INBETWEEN_MOUSEMOVE', x=600, y=350))
+check("shift_rmb modal: inbetween moves handled", rv == {'RUNNING_MODAL'})
+check("shift_rmb modal: Z rotation from dx, X/Y untouched",
+      abs(rmb_scene.lm_hdri.rotation[2] - (0.5 + 100 * 0.006)) < 1e-6
+      and rmb_scene.lm_hdri.rotation[0] == 0.2
+      and rmb_scene.lm_hdri.rotation[1] == 0.1)
+rv = rmb.modal(bpy.context, _ev('RIGHTMOUSE', 'RELEASE'))
+check("shift_rmb modal: FINISHED on release", rv == {'FINISHED'})
+
+rmb_scene.lm_hdri.rotation = (0.0, 0.0, 0.5)
+rmb2 = RmbOp()
+rmb2.invoke(bpy.context, _ev('RIGHTMOUSE', 'PRESS', 100, 100))
+rv = rmb2.modal(bpy.context, _ev('ESC'))
+check("shift_rmb modal: ESC restores + CANCELLED",
+      rv == {'CANCELLED'} and rmb_scene.lm_hdri.rotation == (0.0, 0.0, 0.5))
+
+ns["unregister_shift_rmb_keymap"]()
+check("shift_rmb: keymap removed on unregister",
+      len(km3d.keymap_items.items) == 0)
+bpy.context = types.SimpleNamespace()  # no window_manager
+ns["unregister_shift_rmb_keymap"]()
+check("shift_rmb: no keyconfig -> no crash", True)
 
 # ---------------------------------------------------------------- unregister
 try:

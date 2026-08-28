@@ -81,6 +81,8 @@ HDRI_EXTENSIONS = ('.exr', '.hdr')
 _hdri_pcoll = None        # preview collection, created in register()
 _hdri_enum_cache = []     # dynamic enum items must outlive the callback
 _hdri_cache_folder = None
+_hdri_km = None           # addon keymap for Shift+RMB rotation
+_hdri_kmi = None
 
 
 def hdri_enum_items(self, context):
@@ -153,6 +155,35 @@ def update_hdri_power(self, context):
         pass
 
 
+def register_shift_rmb_keymap():
+    """Register the Shift+RMB viewport keymap (operator poll gates the toggle)."""
+    global _hdri_km, _hdri_kmi
+    if _hdri_kmi is not None:
+        return
+    try:
+        wm = getattr(bpy.context, "window_manager", None)
+        kc = wm.keyconfigs.addon if wm is not None else None
+        if kc is None:
+            return
+        km = kc.keymaps.new(name="3D View", space_type='VIEW_3D')
+        _hdri_kmi = km.keymap_items.new(
+            "light_manager.hdri_shift_rmb", 'RIGHTMOUSE', 'PRESS', shift=True)
+        _hdri_km = km
+    except Exception:
+        pass
+
+
+def unregister_shift_rmb_keymap():
+    global _hdri_km, _hdri_kmi
+    if _hdri_km is not None and _hdri_kmi is not None:
+        try:
+            _hdri_km.keymap_items.remove(_hdri_kmi)
+        except Exception:
+            pass
+    _hdri_kmi = None
+    _hdri_km = None
+
+
 class LM_HDRISettings(PropertyGroup):
     hdri_folder: StringProperty(
         name="HDRI Folder",
@@ -179,6 +210,11 @@ class LM_HDRISettings(PropertyGroup):
         soft_max=10.0,
         update=update_hdri_power,
         description="Strength of the environment background",
+    )
+    shift_rmb_rotate: BoolProperty(
+        name="Rotate with Shift+RMB",
+        description="Drag with Shift+Right Mouse in the viewport to rotate the HDRI",
+        default=False,
     )
 
 
@@ -652,6 +688,8 @@ class LM_PT_HDRIPanel(bpy.types.Panel):
         col.operator("light_manager.hdri_apply", icon='WORLD')
         col.operator("light_manager.hdri_clear", text="Clear HDRI", icon='X')
         col.separator()
+        col.prop(hdri, "shift_rmb_rotate", text="Rotate: Shift+RMB", icon='GESTURE_ROTATE')
+        col.separator()
         col.prop(hdri, "rotation")
         col.prop(hdri, "power")
 
@@ -983,6 +1021,65 @@ class LM_OT_hdri_apply(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LM_OT_hdri_shift_rmb(bpy.types.Operator):
+    """Rotate the HDRI by dragging with Shift+RMB in the viewport."""
+    bl_idname = "light_manager.hdri_shift_rmb"
+    bl_label = "Rotate HDRI"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        hdri = getattr(context.scene, "lm_hdri", None)
+        return hdri is not None and hdri.shift_rmb_rotate
+
+    def invoke(self, context, event):
+        hdri = context.scene.lm_hdri
+        self._start_mouse = (event.mouse_x, event.mouse_y)
+        self._start_rot = tuple(hdri.rotation)
+        self._set_status(context, True)
+        # Attach the modal handler explicitly — without it no events arrive
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        hdri = getattr(context.scene, "lm_hdri", None)
+        if hdri is None:
+            self._set_status(context, False)
+            return {'CANCELLED'}
+        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+            dx = event.mouse_x - self._start_mouse[0]
+            hdri.rotation = (self._start_rot[0],
+                             self._start_rot[1],
+                             self._start_rot[2] + dx * 0.006)
+            return {'RUNNING_MODAL'}
+        if event.value == 'RELEASE' and event.type in {'RIGHTMOUSE', 'LEFTMOUSE'}:
+            self._set_status(context, False)
+            return {'FINISHED'}
+        if event.type == 'ESC':
+            hdri.rotation = self._start_rot
+            self._set_status(context, False)
+            return {'CANCELLED'}
+        return {'PASS_THROUGH'}
+
+    def _set_status(self, context, on):
+        text = "LAMPOCHKA HDRI: drag — rotate  |  Ctrl+Z — undo" if on else None
+        try:
+            if on:
+                context.window.cursor_modal_set('MOVE_X')
+            else:
+                context.window.cursor_modal_restore()
+        except Exception:
+            pass
+        try:
+            context.workspace.status_text_set(text)
+        except Exception:
+            pass
+        try:
+            context.area.header_text_set(text)
+        except Exception:
+            pass
+
+
 class LM_OT_hdri_clear(bpy.types.Operator):
     """Remove the HDRI setup from the world."""
     bl_idname = "light_manager.hdri_clear"
@@ -1157,6 +1254,7 @@ classes = (
     LM_OT_hdri_pick_folder,
     LM_OT_hdri_apply,
     LM_OT_hdri_clear,
+    LM_OT_hdri_shift_rmb,
     LM_OT_ies_pick_folder,
     LM_OT_ies_apply,
     LM_OT_ies_remove,
@@ -1200,10 +1298,14 @@ def register():
         _hdri_pcoll = bpy.utils.previews.new()
     if _ies_pcoll is None:
         _ies_pcoll = bpy.utils.previews.new()
+    # Shift+RMB HDRI rotation keymap (always on, operator poll gates the toggle)
+    register_shift_rmb_keymap()
 
 
 def unregister():
     global _hdri_pcoll, _ies_pcoll
+    # Remove the Shift+RMB keymap
+    unregister_shift_rmb_keymap()
     # Remove sync handler
     if sync_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(sync_handler)
