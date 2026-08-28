@@ -1,6 +1,6 @@
-# LAMPOCHKA v2.0
+# LAMPOCHKA v2.3
 
-Blender addon for managing all lights in the scene from a single panel.
+Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
 
 Instead of searching for lights in the Outliner or switching between objects, you get a dedicated panel with instant access to every light's settings — color, power, shadow, type-specific parameters, and transforms.
 
@@ -19,6 +19,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 
 ### Inline Settings (via ⚙)
 - Light type, color, power
+- **Kelvin temperature (v2.3)** — toggle drives light color from blackbody temperature (1500–12000 K slider); the original color is remembered and restored on toggle off. Node lights (e.g. with an IES profile) are driven through a Blackbody node instead. Works in Cycles and EEVEE
 - Shadow toggle + shadow size
 - **Point** — radius
 - **Sun** — angle
@@ -40,6 +41,30 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 - Settings state transfers when switching between lights:
   - If settings were open → they open for the new light
   - If settings were closed → they stay closed
+
+### HDRI Browser (v2.1)
+- Collapsible **HDRI** sub-panel below the light list
+- Pick a folder — all `.exr` / `.hdr` files appear as a thumbnail grid
+- **Apply HDRI** — builds the world node setup (TexCoord → Mapping → Environment → Background) in one click
+- If the world already has an environment setup, only the image is swapped — existing nodes are not destroyed
+- **Clear HDRI** — removes the HDRI node chain and leaves a plain Background (strength 1); rotation and strength reset in the panel
+- **Rotation** — rotate the environment (Z for turntable-style spin, X/Y for tilt)
+- **Strength** — environment intensity, live update
+- Rotation and strength apply to the HDRI node setup even after re-applying a different HDRI
+- **Remembered folder** — the last picked HDRI folder is stored in add-on preferences and auto-filled in every new project; an individual `.blend` can still override it with its own folder
+
+#### Where is the remembered folder stored?
+`Preferences → Add-ons / Get Extensions → LAMPOCHKA → Default HDRI Folder`.
+Picking a folder in the panel updates it automatically; you can also edit it there manually.
+
+### IES Browser (v2.3)
+- Collapsible **IES** sub-panel below the light list
+- Pick a folder — all `.ies` files appear as a grid (thumbnails are picked up from a `thumbnails/` subfolder if present, like `thumbnails/<name>.jpg`)
+- **Apply IES** — builds the IES node setup on the **active light** (Point or Spot): `IES → Emission → Output`
+- If the light already has the LAMPOCHKA IES setup, only the file is swapped; if it has an Emission chain, the IES node is inserted without destroying nodes
+- **Remove IES** strips the IES node from the active light
+- IES profiles work in **Cycles only** (the panel warns when another engine is active)
+- The last picked folder is remembered in preferences, same as HDRI
 
 ## Installation
 
@@ -65,20 +90,27 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 
 ```
 LAMPOCHKA/
-├── README.md
-├── lampochka_legacy.zip
-├── lampochka_extension.zip
-├── legacy/
-│   └── lampochka/
-│       └── __init__.py
-└── extension/
-    ├── __init__.py
-    └── blender_manifest.toml
+├── out/                       ← distributives (this folder)
+│   ├── README.md
+│   ├── lampochka_legacy.zip
+│   └── lampochka_extension.zip
+└── work/                      ← sources (git repo)
+    ├── extension/
+    │   ├── __init__.py
+    │   └── blender_manifest.toml
+    ├── legacy/
+    │   └── lampochka/
+    │       └── __init__.py
+    └── screen/
 ```
 
 ## Requirements
 
 Blender 3.6+ (legacy) or 4.2+ (extension)
+
+## Credits
+
+- Inspired by the **Lumio** add-on (The Blenderender) — HDRI browser concept
 
 ## Author
 

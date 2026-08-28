@@ -1,0 +1,3 @@
+# Reference addons (commercial) — never push to GitHub
+ref/
+__pycache__/
