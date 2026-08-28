@@ -2,6 +2,8 @@
 
 ![LAMPOCHKA](screen/LAMPOCHKA_cover.png)
 
+*Readme in Russian: [README_ru.md](README_ru.md)*
+
 Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
 
 **Blender 3.6+ / 4.2+ · Author: Maksim Kovalev**
@@ -21,7 +23,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 ### Visibility Controls
 - 👁 — toggle viewport visibility per light
 - 📷 — toggle render visibility per light
-- ✕ — delete the light right from the row (Ctrl+Z friendly)
+- 🗑 — delete the light right from the row (Ctrl+Z friendly)
 - Global toggle all visibility / render from header
 
 ### Inline Settings (via ⚙)
@@ -57,7 +59,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 - **Apply HDRI** — builds the world node setup (TexCoord → Mapping → Environment → Background) in one click
 - If the world already has an environment setup, only the image is swapped — existing nodes are not destroyed
 - **Hide from Camera (v2.4)** — show a flat color to the camera instead of the HDRI (black by default) while lighting and reflections keep the HDRI; classic VFX trick for rendering on a clean plate
-- **Clear HDRI** — removes the HDRI node chain and leaves a plain Background (strength 1); rotation and strength reset in the panel
+- **Clear HDRI** — removes the HDRI node chain and leaves a pitch-black Background with zero strength (no environment light); rotation resets and the panel strength returns to its default 1, so the next HDRI applies at full power
 - **Rotation** — rotate the environment (Z for turntable-style spin, X/Y for tilt)
 - **Strength** — environment intensity, live update
 - **Rotate: Shift+RMB** — toggle; when enabled, drag with **Shift + Right Mouse** in the viewport to spin the HDRI around Z. Ctrl+Z undoes the whole drag. The toggle is always off in a fresh session (resets on every file load) so the default navigation is never hijacked unexpectedly
@@ -85,6 +87,30 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - IES profiles work in **Cycles only** (the panel warns when another engine is active)
 - The last picked folder is remembered in preferences, same as HDRI
 
+### Interactive Placement (v3)
+- **Cursor button** on each light row is the master switch, manual only:
+  - **ON** — the light follows the cursor freely (no snapping), viewport navigation keeps working
+  - **Alt** (held) — snap the light to the surface under the cursor
+  - **G** — works as the placement operator while the button is ON: applies the current run, press again to place again; with the button OFF, G is the native Grab
+  - **LMB / Enter** — apply the current run, **RMB / Esc** — reset the run to where it started
+  - **Wheel** — power, **Shift + wheel** — size, **Ctrl + wheel** — depth of the movement plane
+  - **OFF** — everything returns to normal, nothing runs
+- The button state is reset when a file loads, so the mode is never active unexpectedly
+
+### Light & Shadow Linking (v3)
+- **Light Linking: Pick** / **Shadow Linking: Pick** in the light's ⚙ settings (Blender 4.x)
+- Click objects in the viewport to link/unlink them as receivers or blockers of the light — faster than digging through outliner collections
+- Enter confirms, Esc / Right click rolls back to the state before the picking session
+- Clear Receivers / Clear Blockers buttons wipe the link assignments
+
+### Gobo Projection (v3)
+- Collapsible **Gobo** sub-panel: project a texture from the active **spot light** (Cycles)
+- Pick a folder — textures appear as a thumbnail grid, click Apply
+- Built on **the active light**: if the light has no node setup, a clean `TexCoord → Mapping → Image → Emission → Output` chain is built; if it already has an Emission chain, the gobo is multiplied in without destroying nodes
+- **Rotation / Scale** sliders drive the projection mapping live
+- **Remove Gobo** strips the gobo nodes and restores the previous color source
+- The last picked folder is remembered in preferences, same as HDRI and IES
+
 ## Installation
 
 ### Ready-to-use archives
@@ -111,27 +137,29 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 
 ```
 LAMPOCHKA/
-├── out/                       ← distributives (this folder)
-│   ├── README.md
-│   ├── lampochka_legacy.zip
-│   └── lampochka_extension.zip
+├── out/                       ← distributives per version (out/v3.0.0/)
 └── work/                      ← sources (git repo)
-    ├── extension/
+    ├── extension/             ← Blender 4.2+ (manifest, no bl_info)
     │   ├── __init__.py
     │   └── blender_manifest.toml
-    ├── legacy/
-    │   └── lampochka/
-    │       └── __init__.py
-    └── screen/
+    ├── legacy/lampochka/      ← Blender 3.6+ (with bl_info)
+    ├── screen/                ← cover & panel screenshots
+    ├── tests/test_mock.py     ← mock test suite, runs without Blender
+    └── ROADMAP.md             ← development history & plans
 ```
 
 ## Requirements
 
 Blender 3.6+ (legacy) or 4.2+ (extension)
 
+## License
+
+GPL-3.0-or-later — see [LICENSE](LICENSE). © Maksim Kovalev
+
 ## Credits
 
 - Inspired by the **Lumio** add-on (The Blenderender) — HDRI browser concept
+- Solar position — public-domain NOAA algorithm
 
 ## Author
 

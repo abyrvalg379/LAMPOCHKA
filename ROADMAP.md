@@ -77,16 +77,33 @@ PLS/Quick Studio/LMP — продукты-конструкторы из банд
 - **Грабля-урок:** в HA-формуле был лишний −180° (солнце «на антиподе», el=−10° в полдень) —
   поймали bound-тесты на реальных координатах ДО релиза; не брать формулы «по памяти» без проверок
 
-## v3 — Большие фичи (выбрать по надобности)
+## v3.0.0 — Большие фичи ✅ (сделано 2026-08-28, dist out/v3.0.0/, релиз после подтверждения)
 
-- **Интерактивная расстановка света** (LMP `__init__.py:2502-3204`, облегчённая версия):
-  raycast-размещение, колесо = power/size/distance, freeze по Enter, HUD, PASS_THROUGH
-  для навигации; УРЕЗАННАЯ — без их нормаль-блендинга и roll
-- **Light/shadow linking кликом** по объекту под курсором (LMP `732-829`) со snapshot/rollback —
-  удобнее хоткея Lumio; поверх нативного light linking 4.x
-- **Гобо-проекции** (подтверждено двумя рефами: Lumio пресеты + LMP 1130 текстур):
-  строим проекционную цепочку кодом (не их .blend-группы); ассеты не бандлим — папка пользователя
-- Контроллер-empty + Damped Track + Shrinkwrap-snap (LMP `2203-2234`) как аим-паттерн
+Реализовано (все три):
+- **Интерактивная расстановка** (`light_manager.place_light`): кнопка CURSOR в ⚙-настройках
+  света → модалка; mousemove = raycast через `view3d_utils.region_2d_to_origin_3d/vector_3d` +
+  `scene.ray_cast`, свет ставится на hit + normal*0.001; Wheel = power ×1.25, Shift+Wheel = size
+  (size/shadow_soft_size/angle по типу); LMB/Enter = FINISHED, RMB/Esc = откат трансформа;
+  MIDDLEMOUSE/trackpad = PASS_THROUGH (навигация жива); HUD в header+status bar; UNDO
+- **Light/shadow linking кликом** (`light_manager.link_pick`, режимы RECEIVER/BLOCKER):
+  кнопки в ⚙ (видны только при `light.light_linking`, т.е. Blender 4.x); LMB = тоггл линка
+  объекта под курсором (raycast); коллекция создаётся при первом линке
+  (`LM Receiver/Blocker <light>`); снапшот обоих списков в invoke, Esc/RMB = rollback;
+  Enter = принять; `link_clear` (RECEIVER/BLOCKER/ALL); guard для Blender 3.x
+- **Гобо-проекции**: суб-панель Gobo, папка + enum с превью (как IES), prefs `gobo_folder` +
+  load_post сид; Apply на активный SPOT: build-ветка (TexCoord Generated → Mapping 'LM Gobo
+  Mapping' → TexImage 'LM Gobo' → Emission → Output) и insert-ветка (MixRGB MULTIPLY 'LM Gobo
+  Mix' между старым источником цвета и Emission Color, Color1 = старый источник или запечённый
+  цвет); Remove восстанавливает старый источник цвета; rotation (градусы)/scale пишутся в Mapping
+  живьём; маркеры сносятся Remove
+- **Урок (повторение бага розового мира из v2.3):** в первой версии гобо image не присваивался
+  TexImage-ноде — поймал себя ДО тестов и добавил мок-проверку `image assigned to node`
+- Мок-тест **172 проверки** (было 136): гобо build/insert/remove/update, linking
+  create/toggle/snapshot/restore/clear/guard, placement size-key
+- **Регрессия найдена при сборке:** legacy-zip v2.4.1 и v2.5.0 ушли БЕЗ bl_info (в Preferences —
+  имя папки). В v3.0.0 legacy собирается скриптом с bl_info-преамбулой (docstring первым);
+  при выпуске патчей 2.4.x/2.5.1 желательно перевыпустить
+- Модалки place/link_pick НЕ тестируются моком (raycast/UI), живой тест — за пользователем
 
 ## Паттерны для внутреннего использования (из рефов)
 

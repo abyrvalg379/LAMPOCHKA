@@ -68,6 +68,14 @@ class FakeNode:
         self.outputs.setdefault("Is Camera Ray", _sock())
         for sock in list(self.inputs.values()) + list(self.outputs.values()):
             sock.node = self
+        # vector-like sockets are indexed by component in the addon code
+        for name in ("Rotation", "Location", "Scale"):
+            for coll in (self.inputs, self.outputs):
+                if name in coll:
+                    coll[name].default_value = [0.0, 0.0, 0.0]
+        for coll in (self.inputs, self.outputs):
+            if "Color" in coll and coll["Color"].default_value is None:
+                coll["Color"].default_value = [0.0, 0.0, 0.0, 1.0]
 
     @property
     def location(self):
@@ -105,6 +113,7 @@ class FakeObj:
 
 class FakeLightData:
     def __init__(self):
+        self.name = "Light"
         self.type = 'SPOT'
         self.use_nodes = False
         self.node_tree = FakeTree()
@@ -129,6 +138,7 @@ class FakeNodes(list):
                 "ShaderNodeTexCoord": "TEX_COORD",
                 "ShaderNodeOutputWorld": "OUTPUT_WORLD",
                 "ShaderNodeTexIES": "TEX_IES",
+                "ShaderNodeTexImage": "TEX_IMAGE",
                 "ShaderNodeEmission": "EMISSION",
                 "ShaderNodeOutputLight": "OUTPUT_LIGHT",
                 "ShaderNodeBlackbody": "BLACKBODY",
@@ -326,6 +336,45 @@ bpy.data = types.SimpleNamespace(
 )
 _scene = bpy.context.scene
 
+# v3 mocks: collections / objects for light linking
+_objects_db = {}
+
+
+class FakeObjCollection:
+    """Collection.objects stand-in: link/unlink/get/iteration."""
+
+    def __init__(self):
+        self._items = {}
+
+    def link(self, obj):
+        self._items[obj.name] = obj
+
+    def unlink(self, obj):
+        self._items.pop(obj.name, None)
+
+    def get(self, name):
+        return self._items.get(name)
+
+    def __iter__(self):
+        return iter(list(self._items.values()))
+
+    def __len__(self):
+        return len(self._items)
+
+
+class FakeColl:
+    def __init__(self, name):
+        self.name = name
+        self.objects = FakeObjCollection()
+
+
+bpy.data.collections = types.SimpleNamespace(new=lambda n: FakeColl(n))
+bpy.data.objects = types.SimpleNamespace(
+    get=lambda name: _objects_db.get(name))
+for _n in ("Wall", "Floor", "Actor"):
+    _o = FakeObj('MESH', name=_n)
+    _objects_db[_n] = _o
+
 
 def _pointer(type):
     _pointers.append(type)
@@ -351,6 +400,7 @@ check("lm_sun pointer added", ns["LM_SunSettings"] in _pointers)
 check("object kelvin props added",
       hasattr(bpy.types.Object, "lm_use_temperature")
       and hasattr(bpy.types.Object, "lm_temperature"))
+check("object place toggle added", hasattr(bpy.types.Object, "lm_place_enable"))
 check("sync handler appended", ns["sync_handler"] in _handlers["deps"])
 check("load_post handler appended", ns["load_post_handler"] in _handlers["load"])
 check("sun frame handler appended", ns["sun_frame_handler"] in _handlers["frame"])
@@ -537,8 +587,9 @@ types_after = sorted(n.type for n in _world.node_tree.nodes)
 check("clear: env/mapping/texcoord removed",
       types_after == ["BACKGROUND", "OUTPUT_WORLD"], str(types_after))
 bg2 = [n for n in _world.node_tree.nodes if n.type == "BACKGROUND"][0]
-check("clear: strength reset", bg2.inputs["Strength"].default_value == 1.0)
-check("clear: props reset", _scene.lm_hdri.rotation == (0.0, 0.0, 0.0)
+check("clear: strength reset to 0", bg2.inputs["Strength"].default_value == 0.0)
+check("clear: background black", tuple(bg2.inputs["Color"].default_value[:3]) == (0.0, 0.0, 0.0))
+check("clear: props reset (power back to 1)", _scene.lm_hdri.rotation == (0.0, 0.0, 0.0)
       and _scene.lm_hdri.power == 1.0)
 n_before = len(_world.node_tree.nodes)
 rv = clear.execute(bpy.context)
@@ -991,6 +1042,202 @@ ps.preset = 'GOLDEN'
 ps.execute(ps_ctx)
 check("sun preset golden -> sunset-1", pr.lm_sun.time_hours == 20.5)
 
+# ================================================================ v3: gobo
+check("lm_gobo pointer added", ns["LM_GoboSettings"] in _pointers)
+check("prefs has gobo folder",
+      "gobo_folder" in ns["LM_AddonPreferences"].__annotations__)
+
+_scene.lm_gobo = types.SimpleNamespace(gobo_folder="", selected_gobo="",
+                                       rotation=30.0, scale=2.0)
+
+gobo_obj = FakeObj('LIGHT', FakeLightData(), name="SpotGobo")
+gobo_light = gobo_obj.data
+gobo_ctx = types.SimpleNamespace(scene=_scene, active_object=gobo_obj)
+
+# --- build branch (light without nodes)
+rv = ns["_gobo_apply_image"](gobo_ctx, "g_test.png")
+gnodes = gobo_light.node_tree.nodes
+check("gobo apply returns FINISHED", rv == {'FINISHED'})
+check("gobo build: light uses nodes", gobo_light.use_nodes is True)
+tc = gnodes.get("LM Gobo TexCoord")
+mp = gnodes.get("LM Gobo Mapping")
+ti = gnodes.get("LM Gobo")
+em = next((n for n in gnodes if n.type == 'EMISSION'), None)
+out = next((n for n in gnodes if n.type == 'OUTPUT_LIGHT'), None)
+check("gobo build: all nodes created",
+      tc is not None and mp is not None and ti is not None
+      and em is not None and out is not None)
+check("gobo build: image assigned to node",
+      ti is not None and ti.image is not None)
+check("gobo build: texcoord -> mapping -> image -> emission color -> output",
+      tc.outputs["Generated"].links and tc.outputs["Generated"].links[0].to_socket is mp.inputs["Vector"]
+      and mp.outputs["Vector"].links[0].to_socket is ti.inputs["Vector"]
+      and ti.outputs["Color"].links[0].to_socket is em.inputs["Color"]
+      and em.outputs["Emission"].links[0].to_socket is out.inputs["Surface"])
+check("gobo build: mapping rotation/scale from props",
+      abs(mp.inputs["Rotation"].default_value[2] - 0.5236) < 0.001
+      and mp.inputs["Scale"].default_value == (2.0, 2.0, 2.0))
+
+# --- insert branch (existing chain, color from blackbody)
+ins_obj = FakeObj('LIGHT', FakeLightData(), name="SpotIns")
+ins_light = ins_obj.data
+ins_light.use_nodes = True
+tn = ins_light.node_tree.nodes
+tl = ins_light.node_tree.links
+bb = tn.new("ShaderNodeBlackbody")
+emis = tn.new("ShaderNodeEmission")
+outl = tn.new("ShaderNodeOutputLight")
+tl.new(bb.outputs["Fac"], emis.inputs["Color"])
+tl.new(emis.outputs["Emission"], outl.inputs["Surface"])
+ins_ctx = types.SimpleNamespace(scene=_scene, active_object=ins_obj)
+rv = ns["_gobo_apply_image"](ins_ctx, "g_test.png")
+mix = tn.get("LM Gobo Mix")
+em_color_in = emis.inputs["Color"]
+check("gobo insert: mix node added", mix is not None and mix.type == 'MIX_RGB')
+check("gobo insert: emission color fed by mix",
+      em_color_in.is_linked and em_color_in.links[0].from_socket is mix.outputs["Color"])
+check("gobo insert: color1 keeps old source (blackbody)",
+      mix.inputs["Color1"].is_linked
+      and mix.inputs["Color1"].links[0].from_socket is bb.outputs["Fac"])
+check("gobo insert: color2 from gobo image",
+      mix.inputs["Color2"].is_linked
+      and mix.inputs["Color2"].links[0].from_socket is tn.get("LM Gobo").outputs["Color"])
+check("gobo insert: existing image node gets image",
+      tn.get("LM Gobo").image is not None)
+check("gobo insert: fac = 1", mix.inputs["Fac"].default_value == 1.0)
+
+# --- remove restores the previous chain
+ns["_gobo_remove"](ins_ctx)
+check("gobo remove: mix gone", tn.get("LM Gobo Mix") is None)
+check("gobo remove: markers gone",
+      tn.get("LM Gobo") is None and tn.get("LM Gobo Mapping") is None
+      and tn.get("LM Gobo TexCoord") is None)
+check("gobo remove: emission color restored from blackbody",
+      em_color_in.is_linked and em_color_in.links[0].from_socket is bb.outputs["Fac"])
+
+# --- remove on a built-from-scratch chain clears it
+rv = ns["_gobo_remove"](gobo_ctx)
+check("gobo remove: built chain cleared",
+      gnodes.get("LM Gobo") is None and gnodes.get("LM Gobo Mapping") is None
+      and gnodes.get("LM Gobo TexCoord") is None)
+
+# --- unlinked color: color1 gets the old value baked in
+un_obj = FakeObj('LIGHT', FakeLightData(), name="SpotUn")
+un_light = un_obj.data
+un_light.use_nodes = True
+unn = un_light.node_tree.nodes
+une = unn.new("ShaderNodeEmission")
+unn.new("ShaderNodeOutputLight")
+une.inputs["Color"].default_value = (0.5, 0.25, 0.1, 1.0)
+un_ctx = types.SimpleNamespace(scene=_scene, active_object=un_obj)
+ns["_gobo_apply_image"](un_ctx, "g_test.png")
+umix = unn.get("LM Gobo Mix")
+c1 = [round(c, 4) for c in umix.inputs["Color1"].default_value[:3]]
+check("gobo insert (unlinked color): color1 baked",
+      c1 == [0.5, 0.25, 0.1], str(c1))
+
+# --- transform update writes into mapping of active light
+_scene.lm_gobo.rotation = 90.0
+_scene.lm_gobo.scale = 0.5
+ns["update_gobo_transform"](_scene.lm_gobo, gobo_ctx)
+# gobo chain was removed above -> rebuild minimal mapping to test update
+ns["_gobo_apply_image"](gobo_ctx, "g_test.png")
+mp2 = gnodes.get("LM Gobo Mapping")
+_scene.lm_gobo.rotation = 45.0
+_scene.lm_gobo.scale = 3.0
+ns["update_gobo_transform"](_scene.lm_gobo, gobo_ctx)
+check("gobo transform update: rotation",
+      abs(mp2.inputs["Rotation"].default_value[2] - 0.7854) < 0.001)
+check("gobo transform update: scale",
+      mp2.inputs["Scale"].default_value == (3.0, 3.0, 3.0))
+
+# ================================================================ v3: linking
+bpy.data.objects = types.SimpleNamespace(
+    get=lambda name: _objects_db.get(name))
+ll_obj = FakeObj('LIGHT', FakeLightData(), name="LinkLight")
+ll_light = ll_obj.data
+ll_light.light_linking = types.SimpleNamespace(
+    receiver_collection=None, blocker_collection=None)
+link_ctx = types.SimpleNamespace(scene=_scene, active_object=ll_obj)
+
+coll_r = ns["_link_collection"](ll_obj, "receiver")
+check("linking: receiver collection created",
+      coll_r is not None and ll_light.light_linking.receiver_collection is coll_r)
+wall = _objects_db["Wall"]
+floor = _objects_db["Floor"]
+check("linking: toggle links", ns["_link_toggle"](ll_obj, "receiver", wall) is True)
+check("linking: toggle unlinks", ns["_link_toggle"](ll_obj, "receiver", wall) is False)
+ns["_link_toggle"](ll_obj, "receiver", wall)
+ns["_link_toggle"](ll_obj, "receiver", floor)
+check("linking: count", ns["_linking_count"](ll_obj, "receiver") == 2)
+
+snap = ns["_linking_snapshot"](ll_obj)
+ns["_link_toggle"](ll_obj, "receiver", _objects_db["Actor"])
+check("linking: snapshot holds state", len(snap["receiver"]) == 2)
+ns["_linking_restore"](ll_obj, snap)
+check("linking: restore rolls back", ns["_linking_count"](ll_obj, "receiver") == 2
+      and ll_light.light_linking.receiver_collection.objects.get("Actor") is None)
+
+b_coll = ns["_link_collection"](ll_obj, "blocker")
+ns["_link_toggle"](ll_obj, "blocker", wall)
+check("linking: blocker collection separate",
+      b_coll is not coll_r and ns["_linking_count"](ll_obj, "blocker") == 1)
+
+
+class ClearOp(ns["LM_OT_link_clear"]):
+    pass
+
+
+cop = ClearOp()
+cop.mode = 'RECEIVER'
+cop.execute(link_ctx)
+check("link clear: receivers cleared", ns["_linking_count"](ll_obj, "receiver") == 0)
+check("link clear: blockers kept", ns["_linking_count"](ll_obj, "blocker") == 1)
+cop.mode = 'ALL'
+cop.execute(link_ctx)
+check("link clear: all cleared", ns["_linking_count"](ll_obj, "blocker") == 0)
+
+# guard: light without light_linking (Blender 3.x)
+no_ll = FakeObj('LIGHT', FakeLightData(), name="OldLight")
+check("linking: no light_linking -> collection None",
+      ns["_link_collection"](no_ll, "receiver") is None)
+check("linking: no light_linking -> count 0",
+      ns["_linking_count"](no_ll, "receiver") == 0)
+
+# 4.x fresh light: RNA supports light_linking but the datablock is None yet
+ll2 = FakeObj('LIGHT', FakeLightData(), name="FreshLight")
+ll2.data.light_linking = None
+ll2.data.bl_rna = types.SimpleNamespace(properties=["light_linking"])
+check("linking: rna-capable check true",
+      ns["_has_light_linking"](ll2) is True)
+check("linking: datablock initially None",
+      ns["_has_light_linking"](ll2) and ll2.data.light_linking is None)
+bpy.data.light_linkings = types.SimpleNamespace(
+    new=lambda n: types.SimpleNamespace(receiver_collection=None,
+                                        blocker_collection=None, name=n))
+coll_fresh = ns["_link_collection"](ll2, "receiver")
+check("linking: datablock + collection created on demand",
+      coll_fresh is not None
+      and ll2.data.light_linking.receiver_collection is coll_fresh)
+check("linking: rna-incapable light has no linking",
+      ns["_has_light_linking"](FakeObj('LIGHT', FakeLightData(), name="Old2")) is False)
+
+# ================================================================ v3: placement
+check("place: size key AREA", ns["_light_size_key"](
+    types.SimpleNamespace(data=types.SimpleNamespace(type='AREA', size=1.0)))
+    == "size")
+check("place: size key SUN", ns["_light_size_key"](
+    types.SimpleNamespace(data=types.SimpleNamespace(type='SUN', angle=0.5)))
+    == "angle")
+check("place: size key POINT classic", ns["_light_size_key"](
+    types.SimpleNamespace(data=types.SimpleNamespace(
+        type='POINT', shadow_soft_size=1.0))) == "shadow_soft_size")
+check("place: size key POINT renamed radius fallback", ns["_light_size_key"](
+    types.SimpleNamespace(data=types.SimpleNamespace(type='POINT', radius=1.0)))
+    == "radius")
+check("place: size key missing -> None", ns["_light_size_key"](
+    types.SimpleNamespace(data=types.SimpleNamespace(type='POINT'))) is None)
+
 # ---------------------------------------------------------------- unregister
 try:
     ns["unregister"]()
@@ -1006,6 +1253,7 @@ _pointers.remove(ns["LM_IESSettings"])
 check("object kelvin props removed",
       not hasattr(bpy.types.Object, "lm_use_temperature")
       and not hasattr(bpy.types.Object, "lm_temperature"))
+check("object place toggle removed", not hasattr(bpy.types.Object, "lm_place_enable"))
 
 shutil.rmtree(tmp, ignore_errors=True)
 

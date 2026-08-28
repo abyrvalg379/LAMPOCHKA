@@ -396,11 +396,17 @@ class LM_AddonPreferences(AddonPreferences):
         subtype='DIR_PATH',
         description="Folder used when the current scene has no IES folder set",
     )
+    gobo_folder: StringProperty(
+        name="Default Gobo Folder",
+        subtype='DIR_PATH',
+        description="Folder used when the current scene has no gobo folder set",
+    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "hdri_folder")
         layout.prop(self, "ies_folder")
+        layout.prop(self, "gobo_folder")
 
 
 @persistent
@@ -420,10 +426,20 @@ def load_post_handler(dummy):
         if hasattr(scene, "lm_ies") and not scene.lm_ies.ies_folder:
             if prefs.ies_folder:
                 scene.lm_ies.ies_folder = prefs.ies_folder
+        if hasattr(scene, "lm_gobo") and not scene.lm_gobo.gobo_folder:
+            if prefs.gobo_folder:
+                scene.lm_gobo.gobo_folder = prefs.gobo_folder
         # Rotate toggle is always off in a fresh session — otherwise users
         # forget Shift+RMB is hijacked and blame the default navigation
         if hasattr(scene, "lm_hdri"):
             scene.lm_hdri.shift_rmb_rotate = False
+        # same for the G placement arming — never hijack G unexpectedly
+        try:
+            for ob in context.scene.objects:
+                if getattr(ob, "lm_place_enable", False):
+                    ob.lm_place_enable = False
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -871,6 +887,779 @@ class LM_PT_SunPanel(bpy.types.Panel):
 
 
 # ---------------------------------------------------------------------------
+#  Gobo — texture projection for spot lights
+# ---------------------------------------------------------------------------
+
+GOBO_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
+_gobo_pcoll = None        # preview collection, created in register()
+_gobo_enum_cache = []     # dynamic enum items must outlive the callback
+_gobo_cache_folder = None
+
+LM_GOBO_TEXCOORD = 'LM Gobo TexCoord'
+LM_GOBO_MAPPING = 'LM Gobo Mapping'
+LM_GOBO_IMAGE = 'LM Gobo'
+LM_GOBO_MIX = 'LM Gobo Mix'
+
+
+def gobo_enum_items(self, context):
+    """Dynamic enum items (with thumbnails) for gobo images in the folder."""
+    global _gobo_cache_folder
+    folder = self.gobo_folder
+
+    if _gobo_cache_folder == folder and _gobo_enum_cache:
+        return _gobo_enum_cache
+
+    if _gobo_pcoll is not None and _gobo_cache_folder != folder:
+        _gobo_pcoll.clear()
+
+    _gobo_enum_cache.clear()
+    _gobo_cache_folder = folder
+
+    if not folder or not os.path.isdir(folder) or _gobo_pcoll is None:
+        return _gobo_enum_cache
+
+    try:
+        files = sorted(f for f in os.listdir(folder)
+                       if f.lower().endswith(GOBO_EXTENSIONS))
+    except OSError:
+        return _gobo_enum_cache
+
+    for filename in files:
+        filepath = os.path.join(folder, filename)
+        name = os.path.splitext(filename)[0]
+        try:
+            thumb = _gobo_pcoll.load(filepath, filepath, 'IMAGE').icon_id
+        except Exception:
+            thumb = 'TEXTURE'
+        _gobo_enum_cache.append(
+            (filepath, name, filepath, thumb, len(_gobo_enum_cache)))
+
+    return _gobo_enum_cache
+
+
+def update_gobo_transform(self, context):
+    """Write rotation/scale of the panel into the active light's gobo mapping."""
+    try:
+        obj = getattr(context, "active_object", None)
+        light = get_obj_light(obj) if obj is not None else None
+        if light is None or not light.use_nodes or light.node_tree is None:
+            return
+        node = light.node_tree.nodes.get(LM_GOBO_MAPPING)
+        if node is None or node.type != 'MAPPING':
+            return
+        node.inputs['Rotation'].default_value[2] = math.radians(self.rotation)
+        s = max(0.01, self.scale)
+        node.inputs['Scale'].default_value = (s, s, s)
+    except Exception:
+        pass
+
+
+class LM_GoboSettings(PropertyGroup):
+    gobo_folder: StringProperty(
+        name="Gobo Folder",
+        subtype='DIR_PATH',
+        description="Folder containing gobo textures",
+    )
+    selected_gobo: EnumProperty(
+        name="Gobo",
+        items=gobo_enum_items,
+        description="Gobo textures found in the folder",
+    )
+    rotation: FloatProperty(
+        name="Rotation", min=0.0, max=360.0, default=0.0,
+        update=update_gobo_transform,
+        description="Rotation of the projected texture (degrees)",
+    )
+    scale: FloatProperty(
+        name="Scale", min=0.05, max=20.0, default=1.0,
+        update=update_gobo_transform,
+        description="Scale of the projected texture",
+    )
+
+
+def _gobo_light_nodes(light):
+    """(nodes, links, emission, output) for a node light, or (None, ...)."""
+    if not light.use_nodes or light.node_tree is None:
+        return None, None, None, None
+    nodes = light.node_tree.nodes
+    links = light.node_tree.links
+    emission = next((n for n in nodes if n.type == 'EMISSION'), None)
+    output = next((n for n in nodes if n.type == 'OUTPUT_LIGHT'), None)
+    return nodes, links, emission, output
+
+
+def _gobo_cleanup_orphans(nodes):
+    """Drop gobo texture-coordinate chains left without links."""
+    for node in list(nodes):
+        if (node.type == 'TEX_COORD'
+                and not any(out.links for out in node.outputs)
+                and node.name == LM_GOBO_TEXCOORD):
+            nodes.remove(node)
+
+
+def _gobo_apply_image(context, filepath):
+    """Build or update the gobo projection chain on the active spot light."""
+    obj = context.active_object
+    light = get_obj_light(obj)
+    if light is None:
+        return {'CANCELLED'}
+
+    image = bpy.data.images.load(filepath, check_existing=True)
+    nodes, links, emission, output = _gobo_light_nodes(light)
+
+    if emission is None or output is None:
+        # No usable light chain — build a clean gobo setup
+        light.use_nodes = True
+        nodes = light.node_tree.nodes
+        links = light.node_tree.links
+        nodes.clear()
+        texcoord = nodes.new('ShaderNodeTexCoord')
+        texcoord.name = LM_GOBO_TEXCOORD
+        texcoord.label = LM_GOBO_TEXCOORD
+        mapping = nodes.new('ShaderNodeMapping')
+        mapping.name = LM_GOBO_MAPPING
+        mapping.label = LM_GOBO_MAPPING
+        tex_image = nodes.new('ShaderNodeTexImage')
+        tex_image.name = LM_GOBO_IMAGE
+        tex_image.label = LM_GOBO_IMAGE
+        tex_image.image = image
+        emission = nodes.new('ShaderNodeEmission')
+        output = nodes.new('ShaderNodeOutputLight')
+
+        texcoord.location = (-600, 0)
+        mapping.location = (-400, 0)
+        tex_image.location = (-200, 0)
+        emission.location = (0, 0)
+        output.location = (200, 0)
+
+        links.new(texcoord.outputs['Generated'], mapping.inputs['Vector'])
+        links.new(mapping.outputs['Vector'], tex_image.inputs['Vector'])
+        links.new(tex_image.outputs['Color'], emission.inputs['Color'])
+        links.new(emission.outputs['Emission'], output.inputs['Surface'])
+    else:
+        # Existing chain — insert (or update) the multiply mix before Emission Color
+        tex_image = nodes.get(LM_GOBO_IMAGE)
+        if tex_image is None or tex_image.type != 'TEX_IMAGE':
+            texcoord = nodes.new('ShaderNodeTexCoord')
+            texcoord.name = LM_GOBO_TEXCOORD
+            texcoord.label = LM_GOBO_TEXCOORD
+            mapping = nodes.new('ShaderNodeMapping')
+            mapping.name = LM_GOBO_MAPPING
+            mapping.label = LM_GOBO_MAPPING
+            tex_image = nodes.new('ShaderNodeTexImage')
+            tex_image.name = LM_GOBO_IMAGE
+            tex_image.label = LM_GOBO_IMAGE
+            texcoord.location = (-600, emission.location.y)
+            mapping.location = (-400, emission.location.y)
+            tex_image.location = (-200, emission.location.y)
+            links.new(texcoord.outputs['Generated'], mapping.inputs['Vector'])
+            links.new(mapping.outputs['Vector'], tex_image.inputs['Vector'])
+        tex_image.image = image
+
+        mix = nodes.get(LM_GOBO_MIX)
+        color_in = emission.inputs['Color']
+        if mix is None or mix.type != 'MIX_RGB':
+            if mix is not None:
+                nodes.remove(mix)
+            mix = nodes.new('ShaderNodeMixRGB')
+            mix.name = LM_GOBO_MIX
+            mix.label = LM_GOBO_MIX
+            mix.blend_type = 'MULTIPLY'
+            mix.location = (color_in.links[0].from_node.location.x + 100,
+                            emission.location.y - 200) if color_in.is_linked \
+                else (emission.location.x - 100, emission.location.y - 200)
+            if color_in.is_linked:
+                src = color_in.links[0].from_socket
+            else:
+                src = None
+                mix.inputs['Color1'].default_value = tuple(
+                    color_in.default_value[:3]) + (1.0,)
+            links.new(tex_image.outputs['Color'], mix.inputs['Color2'])
+            links.new(mix.outputs['Color'], color_in)
+            if src is not None:
+                links.new(src, mix.inputs['Color1'])
+            mix.inputs['Fac'].default_value = 1.0
+
+    gobo = context.scene.lm_gobo
+    mapping = nodes.get(LM_GOBO_MAPPING)
+    if mapping is not None and mapping.type == 'MAPPING':
+        mapping.inputs['Rotation'].default_value[2] = math.radians(gobo.rotation)
+        s = max(0.01, gobo.scale)
+        mapping.inputs['Scale'].default_value = (s, s, s)
+    return {'FINISHED'}
+
+
+def _gobo_remove(context):
+    obj = context.active_object
+    light = get_obj_light(obj)
+    if light is None or not light.use_nodes or light.node_tree is None:
+        return {'FINISHED'}
+    nodes = light.node_tree.nodes
+    links = light.node_tree.links
+
+    # Restore what fed the mix before removing it
+    mix = nodes.get(LM_GOBO_MIX)
+    src = None
+    mix_color = None
+    if mix is not None and mix.type == 'MIX_RGB':
+        color1 = mix.inputs['Color1']
+        if color1.is_linked:
+            src = color1.links[0].from_socket
+        else:
+            mix_color = tuple(color1.default_value[:3])
+        emission = next((n for n in nodes if n.type == 'EMISSION'), None)
+        nodes.remove(mix)
+        if emission is not None:
+            if src is not None:
+                links.new(src, emission.inputs['Color'])
+            else:
+                emission.inputs['Color'].default_value = tuple(mix_color) + (1.0,)
+
+    for node in list(nodes):
+        if node.name in (LM_GOBO_IMAGE, LM_GOBO_MAPPING, LM_GOBO_TEXCOORD):
+            nodes.remove(node)
+    _gobo_cleanup_orphans(nodes)
+    return {'FINISHED'}
+
+
+class LM_OT_gobo_pick_folder(bpy.types.Operator, ImportHelper):
+    """Pick a folder containing gobo textures."""
+    bl_idname = "light_manager.gobo_pick_folder"
+    bl_label = "Pick Gobo Folder"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ""
+    use_filter_folder = True
+
+    def execute(self, context):
+        folder = os.path.dirname(self.filepath)
+        context.scene.lm_gobo.gobo_folder = folder
+        prefs = get_lm_prefs(context)
+        if prefs is not None:
+            prefs.gobo_folder = folder
+        return {'FINISHED'}
+
+
+class LM_OT_gobo_apply(bpy.types.Operator):
+    """Project the selected gobo texture from the active spot light."""
+    bl_idname = "light_manager.gobo_apply"
+    bl_label = "Apply Gobo"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'LIGHT'
+                and obj.data.type == 'SPOT')
+
+    def execute(self, context):
+        gobo = context.scene.lm_gobo
+        filepath = gobo.selected_gobo
+        if not filepath or not os.path.isfile(filepath):
+            self.report({'ERROR'}, "No valid gobo texture selected")
+            return {'CANCELLED'}
+        rv = _gobo_apply_image(context, filepath)
+        if rv == {'FINISHED'}:
+            self.report({'INFO'},
+                        "Gobo applied: " + os.path.basename(filepath))
+        return rv
+
+
+class LM_OT_gobo_remove(bpy.types.Operator):
+    """Remove the gobo setup from the active light."""
+    bl_idname = "light_manager.gobo_remove"
+    bl_label = "Remove Gobo"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'LIGHT'
+
+    def execute(self, context):
+        return _gobo_remove(context)
+
+
+class LM_PT_GoboPanel(bpy.types.Panel):
+    bl_label = "Gobo"
+    bl_idname = "LM_PT_gobo_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LAMPOCHKA"
+    bl_parent_id = "LM_PT_main_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        gobo = context.scene.lm_gobo
+
+        row = layout.row(align=True)
+        row.prop(gobo, "gobo_folder", text="")
+        row.operator("light_manager.gobo_pick_folder", text="", icon='FILE_FOLDER')
+
+        if not gobo.gobo_folder or not os.path.isdir(gobo.gobo_folder):
+            layout.label(text="Pick a folder with gobo textures", icon='INFO')
+            return
+
+        # Trigger enum rebuild if needed, then check what we have
+        _ = gobo.selected_gobo
+        if not _gobo_enum_cache:
+            layout.label(text="No textures in folder", icon='INFO')
+            return
+
+        if context.engine != 'CYCLES':
+            layout.label(text="Gobo works best in Cycles", icon='ERROR')
+
+        obj = context.active_object
+        light = get_obj_light(obj) if obj is not None else None
+        if light is None or light.type != 'SPOT':
+            layout.label(text="Pick a spot light (gobo needs a cone)", icon='INFO')
+
+        layout.template_icon_view(gobo, "selected_gobo", show_labels=True, scale=4)
+
+        if gobo.selected_gobo:
+            name = os.path.splitext(os.path.basename(gobo.selected_gobo))[0]
+            layout.label(text=name, icon='TEXTURE')
+
+        col = layout.column(align=True)
+        col.operator("light_manager.gobo_apply", icon='TEXTURE')
+        col.operator("light_manager.gobo_remove", text="Remove Gobo", icon='X')
+        col.separator()
+        col.prop(gobo, "rotation")
+        col.prop(gobo, "scale")
+
+
+# ---------------------------------------------------------------------------
+#  Light / shadow linking — pick receivers & blockers by clicking
+# ---------------------------------------------------------------------------
+
+def _viewport_ray(context, coord):
+    """Cast a ray from the viewport through the mouse; returns
+    (location, normal, object) or None."""
+    from bpy_extras import view3d_utils
+    region = getattr(context, "region", None)
+    rv3d = getattr(context, "region_data", None)
+    if region is None or rv3d is None:
+        return None
+    origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+    direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+    # context.depsgraph only exists in some handler contexts — ask for the
+    # evaluated one explicitly (works from operators and modals)
+    depsgraph = context.evaluated_depsgraph_get()
+    result = context.scene.ray_cast(depsgraph, origin, direction)
+    if not result[0]:
+        return None
+    return result[1], result[2], result[4]
+
+
+def _has_light_linking(obj):
+    """Capability check across Blender versions: 5.x keeps the collections
+    on the object, 4.x on the light data (as a lazily-created pointer)."""
+    try:
+        if 'light_linking' in obj.bl_rna.properties:
+            return True
+    except Exception:
+        pass
+    try:
+        return (obj.data is not None
+                and 'light_linking' in obj.data.bl_rna.properties)
+    except Exception:
+        return False
+
+
+def _linking_holder(obj):
+    """Whatever holds receiver/blocker collections: Object.light_linking
+    (5.x) or light data light_linking (4.x), or None."""
+    holder = getattr(obj, "light_linking", None)
+    if holder is not None and hasattr(holder, "receiver_collection"):
+        return holder
+    data = obj.data
+    if data is not None:
+        holder = getattr(data, "light_linking", None)
+        if holder is not None and hasattr(holder, "receiver_collection"):
+            return holder
+    return None
+
+
+def _link_collection(obj, which):
+    """The receiver/blocker collection of the light object, creating the
+    linking datablock and the collection itself if needed."""
+    holder = _linking_holder(obj)
+    if holder is None:
+        if not _has_light_linking(obj):
+            return None
+        new_ll = getattr(bpy.data, "light_linkings", None)
+        if new_ll is None:
+            return None
+        holder = new_ll.new("LM Linking " + obj.name)
+        obj.data.light_linking = holder
+    coll = getattr(holder, which + "_collection", None)
+    if coll is None:
+        coll = bpy.data.collections.new(
+            "LM %s %s" % (which.capitalize(), obj.name))
+        setattr(holder, which + "_collection", coll)
+    return coll
+
+
+def _link_toggle(obj, which, target):
+    """Link/unlink an object as receiver or blocker of the light."""
+    coll = _link_collection(obj, which)
+    if coll is None:
+        return False
+    if coll.objects.get(target.name) is not None:
+        coll.objects.unlink(target)
+        return False
+    coll.objects.link(target)
+    return True
+
+
+def _linking_snapshot(obj):
+    snap = {}
+    for which in ("receiver", "blocker"):
+        holder = _linking_holder(obj)
+        coll = getattr(holder, which + "_collection", None) if holder else None
+        snap[which] = [ob.name for ob in coll.objects] if coll is not None else []
+    return snap
+
+
+def _linking_restore(obj, snap):
+    for which in ("receiver", "blocker"):
+        holder = _linking_holder(obj)
+        coll = getattr(holder, which + "_collection", None) if holder else None
+        if coll is None:
+            continue
+        for ob in list(coll.objects):
+            coll.objects.unlink(ob)
+        for name in snap[which]:
+            ob = bpy.data.objects.get(name)
+            if ob is not None:
+                coll.objects.link(ob)
+
+
+def _linking_count(obj, which):
+    holder = _linking_holder(obj)
+    coll = getattr(holder, which + "_collection", None) if holder else None
+    return len(coll.objects) if coll is not None else 0
+
+
+class LM_OT_link_pick(bpy.types.Operator):
+    """Click objects in the viewport to link/unlink them as receivers or blockers."""
+    bl_idname = "light_manager.link_pick"
+    bl_label = "Pick Linking Targets"
+    bl_options = {'REGISTER'}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=[
+            ('RECEIVER', "Receivers", "Objects lit by this light"),
+            ('BLOCKER', "Blockers", "Objects casting shadows from this light"),
+        ],
+        default='RECEIVER',
+    )
+    light_name: StringProperty()
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'LIGHT':
+            return False
+        return _has_light_linking(obj)
+
+    def invoke(self, context, event):
+        obj = bpy.data.objects.get(self.light_name) or context.active_object
+        self._light = obj
+        self._which = "receiver" if self.mode == 'RECEIVER' else "blocker"
+        self._snapshot = _linking_snapshot(obj)
+        self._set_status(context, "click objects to link / unlink")
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        light = self._light
+        if (light is None or light.name not in context.scene.objects):
+            self._set_status(context, None)
+            return {'CANCELLED'}
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            ray = _viewport_ray(context, (event.mouse_region_x, event.mouse_region_y))
+            if ray is None:
+                return {'RUNNING_MODAL'}
+            target = ray[2]
+            if target is None or target.type == 'LIGHT' or target == light:
+                return {'RUNNING_MODAL'}
+            linked = _link_toggle(light, self._which, target)
+            word = "linked" if linked else "unlinked"
+            self._set_status(context, "%s %s" % (target.name, word))
+            return {'RUNNING_MODAL'}
+        if event.type == 'RET' and event.value == 'PRESS':
+            self._set_status(context, None)
+            return {'FINISHED'}
+        if ((event.type == 'RIGHTMOUSE' and event.value == 'PRESS')
+                or event.type == 'ESC'):
+            _linking_restore(light, self._snapshot)
+            self._set_status(context, None)
+            return {'CANCELLED'}
+        if event.type in {'G', 'R', 'S'} and event.value == 'PRESS':
+            # keep the picked links and let the transform tools through
+            self._set_status(context, None)
+            return {'FINISHED'}
+        if event.type in {'MIDDLEMOUSE', 'TRACKPADPAN', 'TRACKPADZOOM'}:
+            return {'PASS_THROUGH'}
+        return {'RUNNING_MODAL'}  # picking: swallow so the scene stays still
+
+    def _set_status(self, context, extra):
+        if extra is None:
+            text = None
+        else:
+            text = ("LAMPOCHKA %s: %s  |  Enter — done, Esc/RMB — cancel"
+                    % (self.mode.capitalize(), extra))
+        try:
+            context.workspace.status_text_set(text)
+        except Exception:
+            pass
+        try:
+            context.area.header_text_set(text)
+        except Exception:
+            pass
+
+
+class LM_OT_link_clear(bpy.types.Operator):
+    """Unlink all receivers/blockers from the active light."""
+    bl_idname = "light_manager.link_clear"
+    bl_label = "Clear Linking"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    mode: EnumProperty(
+        name="Mode",
+        items=[
+            ('RECEIVER', "Receivers", "Clear light linking"),
+            ('BLOCKER', "Blockers", "Clear shadow linking"),
+            ('ALL', "All", "Clear both"),
+        ],
+        default='ALL',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return (obj is not None and obj.type == 'LIGHT'
+                and _has_light_linking(obj))
+
+    def execute(self, context):
+        obj = context.active_object
+        whiches = ("receiver", "blocker") if self.mode == 'ALL' else (
+            "receiver",) if self.mode == 'RECEIVER' else ("blocker",)
+        for which in whiches:
+            holder = _linking_holder(obj)
+            coll = getattr(holder, which + "_collection", None) if holder else None
+            if coll is None:
+                continue
+            for ob in list(coll.objects):
+                coll.objects.unlink(ob)
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
+#  Interactive placement — move a light by clicking surfaces
+# ---------------------------------------------------------------------------
+
+def _light_size_key(light):
+    """Name of the light data property holding the light's size/radius.
+    Several candidates per type — the name changed across Blender versions."""
+    ldata = light.data
+    candidates = {
+        'AREA': ("size",),
+        'POINT': ("shadow_soft_size", "radius"),
+        'SPOT': ("shadow_soft_size", "radius"),
+        'SUN': ("angle",),
+    }.get(ldata.type, ())
+    for key in candidates:
+        if hasattr(ldata, key):
+            return key
+    return None
+
+
+class LM_OT_place_toggle(bpy.types.Operator):
+    """Switch placement mode for this light: pressed — the light follows
+    the cursor in the viewport; released — nothing runs."""
+    bl_idname = "light_manager.place_toggle"
+    bl_label = "Placement Mode"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    light_name: StringProperty()
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(self.light_name)
+        if obj is None or obj.type != 'LIGHT':
+            return {'CANCELLED'}
+        if obj.lm_place_enable:
+            # button released — the running session sees the flag and stops
+            obj.lm_place_enable = False
+            return {'FINISHED'}
+        obj.lm_place_enable = True
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        bpy.ops.light_manager.place_light('INVOKE_DEFAULT')
+        return {'FINISHED'}
+
+
+class LM_OT_place_light(bpy.types.Operator):
+    """Placement mode: while the cursor button is pressed the light follows
+    the cursor freely (Alt — snap to surfaces). G applies / restarts like a
+    transform operator. LMB/Enter applies, RMB/Esc resets the run."""
+    bl_idname = "light_manager.place_light"
+    bl_label = "Place Light"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def invoke(self, context, event):
+        self._obj = context.active_object
+        self._following = True
+        self._remember_run()
+        self._free_dist = self._initial_free_dist(context)
+        self._set_status(context)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _remember_run(self):
+        """Snapshot the transform at the start of every follow run."""
+        self._run_location = tuple(self._obj.location)
+        self._run_energy = self._obj.data.energy
+        size_key = _light_size_key(self._obj)
+        self._run_size = getattr(self._obj.data, size_key) if size_key else None
+
+    def _initial_free_dist(self, context):
+        from bpy_extras import view3d_utils
+        region = getattr(context, "region", None)
+        rv3d = getattr(context, "region_data", None)
+        if region is None or rv3d is None:
+            return 10.0
+        origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, (0, 0))
+        return max(1.0, (self._obj.location - origin).length)
+
+    def _move_to_ray(self, context, coord, snap=False, depth_factor=1.0):
+        """Free flight along the view ray at the remembered depth.
+        With snap=True (Alt held) the light sticks to the surface."""
+        from bpy_extras import view3d_utils
+        region = getattr(context, "region", None)
+        rv3d = getattr(context, "region_data", None)
+        if region is None or rv3d is None:
+            return
+        origin = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+        direction = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+        if snap:
+            hit = context.scene.ray_cast(
+                context.evaluated_depsgraph_get(), origin, direction)
+            if hit[0]:
+                location, normal = hit[1], hit[2]
+                self._free_dist = max(0.1, (location - origin).length)
+                self._obj.location = location + normal * 0.001
+                return
+        self._free_dist = max(0.1, self._free_dist * depth_factor)
+        self._obj.location = origin + direction * self._free_dist
+
+    def modal(self, context, event):
+        obj = self._obj
+        if obj is None or obj.name not in context.scene.objects:
+            self._set_status(context, False)
+            return {'CANCELLED'}
+        if obj.lm_place_enable is not True:
+            # the cursor button is the only off switch — it was released
+            self._set_status(context, False)
+            return {'FINISHED'}
+
+        if not self._following:
+            # armed idle: only G restarts a run — every other event (UI
+            # clicks, wheel zoom) passes through, nothing feels frozen
+            if event.type == 'G' and event.value == 'PRESS':
+                self._remember_run()
+                self._following = True
+                self._set_status(context)
+                # consume the G: letting it through would also start the
+                # native Grab on top of the follow run
+                return {'RUNNING_MODAL'}
+            return {'PASS_THROUGH'}
+
+        if self._following and event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+            self._move_to_ray(context, (event.mouse_region_x, event.mouse_region_y),
+                              snap=event.alt)
+            return {'RUNNING_MODAL'}
+
+        wheel_up = event.type in {'WHEELUPMOUSE', 'WHEELINMOUSE'}
+        wheel_down = event.type in {'WHEELDOWNMOUSE', 'WHEELOUTMOUSE'}
+        if self._following and (wheel_up or wheel_down):
+            factor = 1.25 if wheel_up else 1.0 / 1.25
+            if event.ctrl:
+                self._move_to_ray(context, (event.mouse_region_x,
+                                            event.mouse_region_y),
+                                  depth_factor=factor)
+            elif event.shift:
+                size_key = _light_size_key(obj)
+                if size_key:
+                    value = getattr(obj.data, size_key) * factor
+                    if value < 1e-4:
+                        # a zero size would stay zero forever — start it off
+                        value = 0.01 if factor > 1.0 else 0.0
+                    if obj.data.type == 'SUN':
+                        value = max(0.0, min(value, math.pi))
+                    else:
+                        value = max(0.0, value)
+                    setattr(obj.data, size_key, value)
+            else:
+                obj.data.energy = max(0.0, obj.data.energy * factor)
+            self._set_status(context)
+            return {'RUNNING_MODAL'}
+
+        if self._following and ((event.type == 'LEFTMOUSE' and event.value == 'PRESS')
+                or (event.type == 'RET' and event.value == 'PRESS')):
+            self._set_status(context, False)
+            self._following = False
+            return {'RUNNING_MODAL'}
+
+        if self._following and ((event.type == 'RIGHTMOUSE' and event.value == 'PRESS')
+                or event.type == 'ESC'):
+            obj.location = self._run_location
+            obj.data.energy = self._run_energy
+            size_key = _light_size_key(obj)
+            if size_key and self._run_size is not None:
+                setattr(obj.data, size_key, self._run_size)
+            self._set_status(context, False)
+            self._following = False
+            return {'RUNNING_MODAL'}
+
+        if event.type in {'MIDDLEMOUSE', 'TRACKPADPAN', 'TRACKPADZOOM'}:
+            return {'PASS_THROUGH'}
+        return {'RUNNING_MODAL'}  # following: swallow so UI doesn't react
+
+    def _set_status(self, context, on=True):
+        if not on:
+            text = None
+        else:
+            size_key = _light_size_key(self._obj)
+            size_val = getattr(self._obj.data, size_key, None) if size_key else None
+            size_txt = (" (%.2f)" % size_val) if size_val is not None else " — n/a"
+            if self._following:
+                text = ("LAMPOCHKA place: LMB/G — apply  |  RMB/Esc — reset  |  "
+                        "Alt — snap to surface  |  Wheel — power (%.0f)  |  "
+                        "Shift+Wheel — size%s  |  Ctrl+Wheel — depth (%.1f m)"
+                        % (self._obj.data.energy, size_txt, self._free_dist))
+            else:
+                text = "LAMPOCHKA place [armed]: G — place the light again"
+        try:
+            context.window.cursor_modal_set(
+                'PAINT_BRUSH' if on else 'DEFAULT')
+        except Exception:
+            pass
+        try:
+            context.workspace.status_text_set(text)
+        except Exception:
+            pass
+        try:
+            context.area.header_text_set(text)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 #  Helpers
 # ---------------------------------------------------------------------------
 
@@ -955,6 +1744,11 @@ class LM_PT_MainPanel(bpy.types.Panel):
                           depress=settings_open)
         op.light_name = obj.name
 
+        # Placement mode: pressed — the light follows the cursor
+        op = row.operator("light_manager.place_toggle", text="", icon='CURSOR',
+                          depress=bool(getattr(obj, "lm_place_enable", False)))
+        op.light_name = obj.name
+
         # Visibility icons (operators)
         op = row.operator("light_manager.toggle_visibility", text="",
                           icon='HIDE_OFF' if not obj.hide_viewport else 'HIDE_ON')
@@ -986,6 +1780,7 @@ class LM_PT_MainPanel(bpy.types.Panel):
         row.operator("light_manager.move_light", text="", icon='TRIA_UP').direction = 'UP'
         row.operator("light_manager.move_light", text="", icon='TRIA_DOWN').direction = 'DOWN'
 
+
         # Settings
         col = box.column(align=True)
         col.prop(light, "type", text="Type")
@@ -996,6 +1791,23 @@ class LM_PT_MainPanel(bpy.types.Panel):
         col.prop(obj, "lm_use_temperature", text="Kelvin")
         if obj.lm_use_temperature:
             col.prop(obj, "lm_temperature", text="Temperature")
+
+        # Light / shadow linking (Blender 4.x)
+        if _has_light_linking(obj):
+            col.separator()
+            op = col.operator("light_manager.link_pick", text="Light Linking: Pick",
+                              icon='EYEDROPPER')
+            op.mode = 'RECEIVER'
+            op.light_name = obj.name
+            op = col.operator("light_manager.link_pick", text="Shadow Linking: Pick",
+                              icon='EYEDROPPER')
+            op.mode = 'BLOCKER'
+            op.light_name = obj.name
+            row = col.row(align=True)
+            op = row.operator("light_manager.link_clear", text="Clear Receivers")
+            op.mode = 'RECEIVER'
+            op = row.operator("light_manager.link_clear", text="Clear Blockers")
+            op.mode = 'BLOCKER'
 
         col.separator()
         col.prop(light, "use_shadow", text="Shadow")
@@ -1477,6 +2289,14 @@ class LM_OT_hdri_next(bpy.types.Operator):
         return _hdri_cycle(context, 1)
 
 
+def _place_armed(context):
+    """True while the Place Light cursor button is pressed on the active
+    light — placement owns the viewport input then."""
+    obj = getattr(context, "active_object", None)
+    return (obj is not None and obj.type == 'LIGHT'
+            and getattr(obj, "lm_place_enable", False) is True)
+
+
 class LM_OT_hdri_shift_rmb(bpy.types.Operator):
     """Rotate the HDRI by dragging with Shift+RMB in the viewport."""
     bl_idname = "light_manager.hdri_shift_rmb"
@@ -1485,6 +2305,8 @@ class LM_OT_hdri_shift_rmb(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
+        if _place_armed(context):
+            return False  # placement mode owns the input while armed
         hdri = getattr(context.scene, "lm_hdri", None)
         return hdri is not None and hdri.shift_rmb_rotate
 
@@ -1571,9 +2393,12 @@ class LM_OT_hdri_clear(bpy.types.Operator):
             output = nodes.new('ShaderNodeOutputWorld')
             output.location = (0, 0)
         links.new(background.outputs['Background'], output.inputs['Surface'])
-        background.inputs['Strength'].default_value = 1.0
+        # "no environment": pitch black, zero strength
+        background.inputs['Color'].default_value = (0.0, 0.0, 0.0, 1.0)
+        background.inputs['Strength'].default_value = 0.0
 
-        # Reset panel state
+        # Panel: strength back to its default, so the next Apply HDRI
+        # comes in at full strength (the world itself stays black/0)
         hdri = context.scene.lm_hdri
         hdri.rotation = (0.0, 0.0, 0.0)
         hdri.power = 1.0
@@ -1696,6 +2521,7 @@ classes = (
     LM_SceneSettings,
     LM_HDRISettings,
     LM_IESSettings,
+    LM_GoboSettings,
     LM_SunSettings,
     LM_AddonPreferences,
     LM_OT_select_light,
@@ -1720,21 +2546,30 @@ classes = (
     LM_OT_ies_pick_folder,
     LM_OT_ies_apply,
     LM_OT_ies_remove,
+    LM_OT_gobo_pick_folder,
+    LM_OT_gobo_apply,
+    LM_OT_gobo_remove,
+    LM_OT_link_pick,
+    LM_OT_link_clear,
+    LM_OT_place_toggle,
+    LM_OT_place_light,
     LM_OT_sun_preset,
     LM_PT_MainPanel,
     LM_PT_HDRIPanel,
     LM_PT_IESPanel,
+    LM_PT_GoboPanel,
     LM_PT_SunPanel,
 )
 
 
 def register():
-    global _hdri_pcoll, _ies_pcoll
+    global _hdri_pcoll, _ies_pcoll, _gobo_pcoll
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.lm_settings = bpy.props.PointerProperty(type=LM_SceneSettings)
     bpy.types.Scene.lm_hdri = bpy.props.PointerProperty(type=LM_HDRISettings)
     bpy.types.Scene.lm_ies = bpy.props.PointerProperty(type=LM_IESSettings)
+    bpy.types.Scene.lm_gobo = bpy.props.PointerProperty(type=LM_GoboSettings)
     bpy.types.Scene.lm_sun = bpy.props.PointerProperty(type=LM_SunSettings)
     # Per-object Kelvin controls (stored as ID props on the light object)
     bpy.types.Object.lm_use_temperature = bpy.props.BoolProperty(
@@ -1742,6 +2577,16 @@ def register():
         description="Drive light color from blackbody temperature",
         default=False,
         update=lm_use_temperature_update,
+    )
+    # Per-light "Place with G" arming toggle (keymap is always registered)
+    bpy.types.Object.lm_place_enable = bpy.props.BoolProperty(
+        name="Place with G",
+        description="Placement mode master switch (manual only). ON: the "
+                    "light follows the cursor freely, Alt snaps it to "
+                    "surfaces, G applies/restarts like a transform operator, "
+                    "wheel — power, Shift+wheel — size, Ctrl+wheel — depth. "
+                    "OFF: nothing runs, G is the native Grab again",
+        default=False,
     )
     bpy.types.Object.lm_temperature = bpy.props.FloatProperty(
         name="Temperature",
@@ -1762,16 +2607,20 @@ def register():
     # Sun animation: re-aim on frame changes
     if sun_frame_handler not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(sun_frame_handler)
-    if _hdri_pcoll is None:
-        _hdri_pcoll = bpy.utils.previews.new()
-    if _ies_pcoll is None:
-        _ies_pcoll = bpy.utils.previews.new()
+    previews = getattr(bpy.utils, "previews", None)  # absent in background mode
+    if previews is not None:
+        if _hdri_pcoll is None:
+            _hdri_pcoll = previews.new()
+        if _ies_pcoll is None:
+            _ies_pcoll = previews.new()
+        if _gobo_pcoll is None:
+            _gobo_pcoll = previews.new()
     # Shift+RMB HDRI rotation keymap (always on, operator poll gates the toggle)
     register_shift_rmb_keymap()
 
 
 def unregister():
-    global _hdri_pcoll, _ies_pcoll
+    global _hdri_pcoll, _ies_pcoll, _gobo_pcoll
     # Remove the Shift+RMB keymap
     unregister_shift_rmb_keymap()
     # Remove sync handler
@@ -1783,17 +2632,26 @@ def unregister():
     # Remove sun frame handler
     if sun_frame_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(sun_frame_handler)
-    if _hdri_pcoll is not None:
-        bpy.utils.previews.remove(_hdri_pcoll)
-        _hdri_pcoll = None
-    if _ies_pcoll is not None:
-        bpy.utils.previews.remove(_ies_pcoll)
-        _ies_pcoll = None
+    previews = getattr(bpy.utils, "previews", None)
+    for name in ("_hdri_pcoll", "_ies_pcoll", "_gobo_pcoll"):
+        pcoll = globals()[name]
+        if pcoll is not None and previews is not None:
+            try:
+                previews.remove(pcoll)
+            except Exception:
+                pass
+        globals()[name] = None
     _hdri_enum_cache.clear()
     _ies_enum_cache.clear()
-    global _hdri_cache_folder, _ies_cache_folder
+    _gobo_enum_cache.clear()
+    global _hdri_cache_folder, _ies_cache_folder, _gobo_cache_folder
     _hdri_cache_folder = None
     _ies_cache_folder = None
+    _gobo_cache_folder = None
+    try:
+        del bpy.types.Scene.lm_gobo
+    except Exception:
+        pass
     try:
         del bpy.types.Scene.lm_hdri
     except Exception:
@@ -1816,6 +2674,10 @@ def unregister():
         pass
     try:
         del bpy.types.Object.lm_temperature
+    except Exception:
+        pass
+    try:
+        del bpy.types.Object.lm_place_enable
     except Exception:
         pass
     for cls in reversed(classes):
