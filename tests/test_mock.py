@@ -59,12 +59,13 @@ class FakeNode:
         self.inputs = FakeSockets()
         self.outputs = FakeSockets()
         for inp in ("Vector", "Generated", "Color", "Rotation", "Location", "Scale",
-                    "Strength", "Surface", "Background"):
+                    "Strength", "Surface", "Background", "Color1", "Color2"):
             self.inputs[inp] = _sock()
             self.outputs[inp] = _sock()
         self.inputs.setdefault("Fac", _sock())
         self.outputs.setdefault("Fac", _sock())
         self.outputs.setdefault("Emission", _sock())
+        self.outputs.setdefault("Is Camera Ray", _sock())
         for sock in list(self.inputs.values()) + list(self.outputs.values()):
             sock.node = self
 
@@ -129,7 +130,9 @@ class FakeNodes(list):
                 "ShaderNodeTexIES": "TEX_IES",
                 "ShaderNodeEmission": "EMISSION",
                 "ShaderNodeOutputLight": "OUTPUT_LIGHT",
-                "ShaderNodeBlackbody": "BLACKBODY"}
+                "ShaderNodeBlackbody": "BLACKBODY",
+                "ShaderNodeMixRGB": "MIX_RGB",
+                "ShaderNodeLightPath": "LIGHT_PATH"}
         n.type = tmap.get(ntype, ntype)
         self.append(n)
         return n
@@ -156,6 +159,9 @@ class FakeLinks:
         self.made = []
 
     def new(self, out_sock, in_sock):
+        # like real Blender: linking to an occupied input replaces the old link
+        for old in list(in_sock.links):
+            self.remove(old)
         link = types.SimpleNamespace(from_socket=out_sock, to_socket=in_sock,
                                      from_node=getattr(out_sock, "node", None),
                                      to_node=getattr(in_sock, "node", None))
@@ -411,8 +417,85 @@ check("swap: image swapped", env.image is scene_image)
 _scene.lm_hdri.selected_hdri = "Z:/nope/missing.exr"
 rv = op.execute(bpy.context)
 check("apply invalid -> CANCELLED", rv == {"CANCELLED"})
+check("apply with hide off: no camera mix created",
+      not any(n.type == 'MIX_RGB' for n in _world.node_tree.nodes))
+
+# ---------------------------------------------------------------- camera invisible
+build_env = [n for n in _world.node_tree.nodes if n.type == "TEX_ENVIRONMENT"][0]
+build_bg = [n for n in _world.node_tree.nodes if n.type == "BACKGROUND"][0]
+
+ns["update_hdri_hide_from_camera"](
+    types.SimpleNamespace(hide_from_camera=True, camera_color=(0.1, 0.2, 0.3)),
+    bpy.context)
+cam_mix = _world.node_tree.nodes.get("LM Cam Mix")
+cam_path = _world.node_tree.nodes.get("LM Cam Path")
+check("cam mix: nodes created", cam_mix is not None and cam_path is not None
+      and cam_mix.type == 'MIX_RGB' and cam_path.type == 'LIGHT_PATH')
+check("cam mix: env -> mix -> background wiring",
+      build_env.outputs['Color'].is_linked
+      and cam_mix.inputs['Color1'].is_linked
+      and build_bg.inputs['Color'].links
+      and build_bg.inputs['Color'].links[0].from_node is cam_mix)
+check("cam mix: is-camera-ray drives Fac",
+      cam_mix.inputs['Fac'].links
+      and cam_mix.inputs['Fac'].links[0].from_node is cam_path)
+check("cam mix: camera color set",
+      cam_mix.inputs['Color2'].default_value == (0.1, 0.2, 0.3, 1.0))
+ns["update_hdri_hide_from_camera"](
+    types.SimpleNamespace(hide_from_camera=True, camera_color=(0.1, 0.2, 0.3)),
+    bpy.context)
+check("cam mix: idempotent",
+      sum(1 for n in _world.node_tree.nodes if n.type == 'MIX_RGB') == 1)
+ns["update_hdri_camera_color"](
+    types.SimpleNamespace(camera_color=(1.0, 0.0, 0.0)), bpy.context)
+check("cam mix: color update", cam_mix.inputs['Color2'].default_value == (1.0, 0.0, 0.0, 1.0))
+ns["update_hdri_hide_from_camera"](
+    types.SimpleNamespace(hide_from_camera=False, camera_color=(1.0, 0.0, 0.0)),
+    bpy.context)
+check("cam mix: toggle off removes nodes and relinks",
+      not any(n.name in ("LM Cam Mix", "LM Cam Path") for n in _world.node_tree.nodes)
+      and build_bg.inputs['Color'].links
+      and build_bg.inputs['Color'].links[0].from_node is build_env)
+
+# ---------------------------------------------------------------- hdri prev/next
+class PrevOp(ns["LM_OT_hdri_prev"]):
+    pass
+
+
+class NextOp(ns["LM_OT_hdri_next"]):
+    pass
+
+
+nxt = NextOp()
+prv = PrevOp()
+_scene.lm_hdri.selected_hdri = "Z:/nope/missing.exr"
+env_before = [n for n in _world.node_tree.nodes if n.type == "TEX_ENVIRONMENT"][0]
+rv = nxt.execute(bpy.context)
+check("hdri next: unknown selection wraps to first",
+      rv == {'FINISHED'} and _scene.lm_hdri.selected_hdri.endswith("a_test.exr"))
+check("hdri next: applied (image swapped)", env_before.image is not None)
+rv = prv.execute(bpy.context)
+check("hdri prev: wraps backwards to last",
+      rv == {'FINISHED'} and _scene.lm_hdri.selected_hdri.endswith("b_test.hdr"))
+
+# clicking a thumbnail auto-applies via the enum update callback
+ns["update_hdri_selected"](
+    types.SimpleNamespace(selected_hdri=os.path.join(tmp, "a_test.exr")),
+    bpy.context)
+env_now = [n for n in _world.node_tree.nodes if n.type == "TEX_ENVIRONMENT"][0]
+check("hdri click: update callback applies image", env_now.image is not None)
+ns["update_hdri_selected"](
+    types.SimpleNamespace(selected_hdri="Z:/nope/missing.exr"), bpy.context)
+check("hdri click: invalid path -> no crash", True)
 
 # ---------------------------------------------------------------- clear hdri
+ns["update_hdri_hide_from_camera"](
+    types.SimpleNamespace(hide_from_camera=True, camera_color=(0.0, 0.0, 0.0)),
+    bpy.context)
+check("cam mix: re-enabled before clear",
+      _world.node_tree.nodes.get("LM Cam Mix") is not None)
+
+
 class ClearOp(ns["LM_OT_hdri_clear"]):
     pass
 
@@ -584,6 +667,17 @@ bpy.context = types.SimpleNamespace(
 ns["load_post_handler"](None)
 check("load_post seeds empty ies folder from prefs",
       seed_scene.lm_ies.ies_folder == "Z:/ies_lib")
+
+rmb_seed_scene = types.SimpleNamespace(
+    lm_hdri=types.SimpleNamespace(hdri_folder="Z:/x", shift_rmb_rotate=True),
+    lm_ies=types.SimpleNamespace(ies_folder=""))
+bpy.context = types.SimpleNamespace(
+    scene=rmb_seed_scene,
+    preferences=types.SimpleNamespace(addons={
+        "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
+ns["load_post_handler"](None)
+check("load_post resets rotate toggle to off",
+      rmb_seed_scene.lm_hdri.shift_rmb_rotate is False)
 
 # ---------------------------------------------------------------- folder persistence
 # picker writes to context.scene — point context back at the main test scene

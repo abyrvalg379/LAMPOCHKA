@@ -155,6 +155,143 @@ def update_hdri_power(self, context):
         pass
 
 
+LM_CAM_MIX = 'LM Cam Mix'
+LM_CAM_PATH = 'LM Cam Path'
+
+
+def _find_node(nodes, ntype):
+    return next((n for n in nodes if n.type == ntype), None)
+
+
+def update_hdri_hide_from_camera(self, context):
+    _hdri_ensure_camera_mix(context.scene.world, self.hide_from_camera,
+                            self.camera_color)
+
+
+def update_hdri_camera_color(self, context):
+    _hdri_ensure_camera_mix(context.scene.world, True, self.camera_color)
+
+
+def _hdri_ensure_camera_mix(world, enabled, color):
+    """Insert/remove the Is Camera Ray mix between env and background."""
+    if world is None or not world.use_nodes or world.node_tree is None:
+        return
+    nodes = world.node_tree.nodes
+    links = world.node_tree.links
+    env = _find_node(nodes, 'TEX_ENVIRONMENT')
+    background = _find_node(nodes, 'BACKGROUND')
+    mix = nodes.get(LM_CAM_MIX)
+
+    if not enabled:
+        if mix is not None and env is not None and background is not None:
+            links.new(env.outputs['Color'], background.inputs['Color'])
+        for marker in (LM_CAM_MIX, LM_CAM_PATH):
+            node = nodes.get(marker)
+            if node is not None:
+                nodes.remove(node)
+        return
+
+    if env is None or background is None:
+        return
+
+    if mix is None or mix.type != 'MIX_RGB':
+        if mix is not None:
+            nodes.remove(mix)
+        mix = nodes.new('ShaderNodeMixRGB')
+        mix.name = LM_CAM_MIX
+        mix.label = LM_CAM_MIX
+        mix.blend_type = 'MIX'
+        mix.location = (env.location.x + 200, env.location.y - 200)
+        path = nodes.new('ShaderNodeLightPath')
+        path.name = LM_CAM_PATH
+        path.label = LM_CAM_PATH
+        path.location = (mix.location.x - 200, mix.location.y - 200)
+        links.new(env.outputs['Color'], mix.inputs['Color1'])
+        links.new(mix.outputs['Color'], background.inputs['Color'])
+        links.new(path.outputs['Is Camera Ray'], mix.inputs['Fac'])
+    mix.inputs['Color2'].default_value = (color[0], color[1], color[2], 1.0)
+
+
+def _hdri_apply_image(context, filepath):
+    """Build or update the world HDRI node chain with the given image."""
+    world = context.scene.world
+    if world is None:
+        world = bpy.data.worlds.new("World")
+        context.scene.world = world
+    world.use_nodes = True
+    nodes = world.node_tree.nodes
+    links = world.node_tree.links
+
+    image = bpy.data.images.load(filepath, check_existing=True)
+
+    env = _find_node(nodes, 'TEX_ENVIRONMENT')
+    background = _find_node(nodes, 'BACKGROUND')
+
+    if env is not None and background is not None:
+        # World already has an environment setup — swap the image only
+        env.image = image
+    else:
+        # Plain world — build the HDRI node tree
+        nodes.clear()
+        node_texcoord = nodes.new('ShaderNodeTexCoord')
+        node_mapping = nodes.new('ShaderNodeMapping')
+        env = nodes.new('ShaderNodeTexEnvironment')
+        background = nodes.new('ShaderNodeBackground')
+        node_output = nodes.new('ShaderNodeOutputWorld')
+
+        node_mapping.name = 'HDRI Mapping'
+        node_mapping.label = 'HDRI Mapping'
+
+        node_texcoord.location = (-800, 0)
+        node_mapping.location = (-600, 0)
+        env.location = (-400, 0)
+        background.location = (-200, 0)
+        node_output.location = (0, 0)
+
+        env.image = image
+
+        links.new(node_texcoord.outputs['Generated'], node_mapping.inputs['Vector'])
+        links.new(node_mapping.outputs['Vector'], env.inputs['Vector'])
+        links.new(env.outputs['Color'], background.inputs['Color'])
+        links.new(background.outputs['Background'], node_output.inputs['Surface'])
+
+    hdri = context.scene.lm_hdri
+    mapping = hdri_find_mapping_node(world)
+    if mapping:
+        mapping.inputs['Rotation'].default_value = hdri.rotation
+    background.inputs['Strength'].default_value = hdri.power
+
+    _hdri_ensure_camera_mix(world, getattr(hdri, "hide_from_camera", False),
+                            getattr(hdri, "camera_color", (0.0, 0.0, 0.0)))
+    return {'FINISHED'}
+
+
+def update_hdri_selected(self, context):
+    """Auto-apply when a thumbnail is clicked in the browser grid."""
+    filepath = self.selected_hdri
+    if filepath and os.path.isfile(filepath):
+        try:
+            _hdri_apply_image(context, filepath)
+        except Exception:
+            pass
+
+
+def _hdri_cycle(context, step):
+    """Move the HDRI selection by step entries (update applies it)."""
+    hdri = context.scene.lm_hdri
+    if not _hdri_enum_cache:
+        return {'CANCELLED'}
+    ids = [item[0] for item in _hdri_enum_cache]
+    try:
+        idx = ids.index(hdri.selected_hdri)
+    except ValueError:
+        # Unknown selection: next starts from the first, prev from the last
+        hdri.selected_hdri = ids[0] if step > 0 else ids[-1]
+        return {'FINISHED'}
+    hdri.selected_hdri = ids[(idx + step) % len(ids)]
+    return {'FINISHED'}
+
+
 def register_shift_rmb_keymap():
     """Register the Shift+RMB viewport keymap (operator poll gates the toggle)."""
     global _hdri_km, _hdri_kmi
@@ -193,6 +330,7 @@ class LM_HDRISettings(PropertyGroup):
     selected_hdri: EnumProperty(
         name="HDRI",
         items=hdri_enum_items,
+        update=update_hdri_selected,
         description="HDRI files found in the folder",
     )
     rotation: FloatVectorProperty(
@@ -215,6 +353,23 @@ class LM_HDRISettings(PropertyGroup):
         name="Rotate with Shift+RMB",
         description="Drag with Shift+Right Mouse in the viewport to rotate the HDRI",
         default=False,
+    )
+    hide_from_camera: BoolProperty(
+        name="Hide from Camera",
+        description="Show a flat color to the camera instead of the HDRI "
+                    "(lighting and reflections keep the HDRI)",
+        default=False,
+        update=update_hdri_hide_from_camera,
+    )
+    camera_color: FloatVectorProperty(
+        name="Camera Color",
+        subtype='COLOR',
+        size=3,
+        min=0.0,
+        max=1.0,
+        default=(0.0, 0.0, 0.0),
+        update=update_hdri_camera_color,
+        description="Color visible to the camera when the HDRI is hidden",
     )
 
 
@@ -263,6 +418,10 @@ def load_post_handler(dummy):
         if hasattr(scene, "lm_ies") and not scene.lm_ies.ies_folder:
             if prefs.ies_folder:
                 scene.lm_ies.ies_folder = prefs.ies_folder
+        # Rotate toggle is always off in a fresh session — otherwise users
+        # forget Shift+RMB is hijacked and blame the default navigation
+        if hasattr(scene, "lm_hdri"):
+            scene.lm_hdri.shift_rmb_rotate = False
     except Exception:
         pass
 
@@ -678,15 +837,46 @@ class LM_PT_HDRIPanel(bpy.types.Panel):
             layout.label(text="No .exr / .hdr files in folder", icon='INFO')
             return
 
-        layout.template_icon_view(hdri, "selected_hdri", show_labels=True, scale=4)
+        # Carousel: one row of three cards — previous / active / next.
+        # The active card's button is drawn pressed; arrows below step through.
+        selected = hdri.selected_hdri
+        cache = _hdri_enum_cache
+        try:
+            active = [item[0] for item in cache].index(selected)
+        except ValueError:
+            active = 0
+        total = len(cache)
+        row = layout.row(align=True)
+        for offset in (-1, 0, 1):
+            item = cache[(active + offset) % total]
+            filepath, name, _desc, icon = item[0], item[1], item[2], item[3]
+            col = row.column(align=True)
+            if isinstance(icon, int):
+                try:
+                    col.template_icon(icon_value=icon, scale=4.5)
+                except Exception:
+                    pass
+            short = name if len(name) <= 12 else name[:11] + "…"
+            op = col.operator("light_manager.hdri_pick", text=short,
+                              depress=(offset == 0))
+            op.index = cache.index(item)
 
+        row = layout.row(align=True)
+        row.operator("light_manager.hdri_prev", text="", icon='TRIA_LEFT')
         if hdri.selected_hdri:
             name = os.path.splitext(os.path.basename(hdri.selected_hdri))[0]
-            layout.label(text=name, icon='WORLD')
+            row.label(text=name, icon='WORLD')
+        else:
+            row.label(text="—")
+        row.operator("light_manager.hdri_next", text="", icon='TRIA_RIGHT')
 
         col = layout.column(align=True)
         col.operator("light_manager.hdri_apply", icon='WORLD')
         col.operator("light_manager.hdri_clear", text="Clear HDRI", icon='X')
+        col.separator()
+        col.prop(hdri, "hide_from_camera", text="Hide from Camera", icon='HIDE_ON')
+        if hdri.hide_from_camera:
+            col.prop(hdri, "camera_color", text="Camera Color")
         col.separator()
         col.prop(hdri, "shift_rmb_rotate", text="Rotate: Shift+RMB", icon='GESTURE_ROTATE')
         col.separator()
@@ -970,55 +1160,46 @@ class LM_OT_hdri_apply(bpy.types.Operator):
         if not filepath or not os.path.isfile(filepath):
             self.report({'ERROR'}, "No valid HDRI selected")
             return {'CANCELLED'}
+        rv = _hdri_apply_image(context, filepath)
+        if rv == {'FINISHED'}:
+            self.report({'INFO'},
+                        "HDRI applied: " + os.path.basename(filepath))
+        return rv
 
-        world = context.scene.world
-        if world is None:
-            world = bpy.data.worlds.new("World")
-            context.scene.world = world
-        world.use_nodes = True
-        nodes = world.node_tree.nodes
-        links = world.node_tree.links
 
-        image = bpy.data.images.load(filepath, check_existing=True)
+class LM_OT_hdri_pick(bpy.types.Operator):
+    """Apply this HDRI to the world."""
+    bl_idname = "light_manager.hdri_pick"
+    bl_label = "Pick HDRI"
+    bl_options = {'REGISTER', 'UNDO'}
 
-        env = next((n for n in nodes if n.type == 'TEX_ENVIRONMENT'), None)
-        background = next((n for n in nodes if n.type == 'BACKGROUND'), None)
+    index: IntProperty(default=-1)
 
-        if env is not None and background is not None:
-            # World already has an environment setup — swap the image only
-            env.image = image
-        else:
-            # Plain world — build the HDRI node tree
-            nodes.clear()
-            node_texcoord = nodes.new('ShaderNodeTexCoord')
-            node_mapping = nodes.new('ShaderNodeMapping')
-            env = nodes.new('ShaderNodeTexEnvironment')
-            background = nodes.new('ShaderNodeBackground')
-            node_output = nodes.new('ShaderNodeOutputWorld')
-
-            node_mapping.name = 'HDRI Mapping'
-            node_mapping.label = 'HDRI Mapping'
-
-            node_texcoord.location = (-800, 0)
-            node_mapping.location = (-600, 0)
-            env.location = (-400, 0)
-            background.location = (-200, 0)
-            node_output.location = (0, 0)
-
-            env.image = image
-
-            links.new(node_texcoord.outputs['Generated'], node_mapping.inputs['Vector'])
-            links.new(node_mapping.outputs['Vector'], env.inputs['Vector'])
-            links.new(env.outputs['Color'], background.inputs['Color'])
-            links.new(background.outputs['Background'], node_output.inputs['Surface'])
-
-        mapping = hdri_find_mapping_node(world)
-        if mapping:
-            mapping.inputs['Rotation'].default_value = hdri.rotation
-        background.inputs['Strength'].default_value = hdri.power
-
-        self.report({'INFO'}, "HDRI applied: " + image.name)
+    def execute(self, context):
+        if 0 <= self.index < len(_hdri_enum_cache):
+            # the enum update callback applies the image
+            context.scene.lm_hdri.selected_hdri = _hdri_enum_cache[self.index][0]
         return {'FINISHED'}
+
+
+class LM_OT_hdri_prev(bpy.types.Operator):
+    """Apply the previous HDRI from the folder."""
+    bl_idname = "light_manager.hdri_prev"
+    bl_label = "Previous HDRI"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        return _hdri_cycle(context, -1)
+
+
+class LM_OT_hdri_next(bpy.types.Operator):
+    """Apply the next HDRI from the folder."""
+    bl_idname = "light_manager.hdri_next"
+    bl_label = "Next HDRI"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        return _hdri_cycle(context, 1)
 
 
 class LM_OT_hdri_shift_rmb(bpy.types.Operator):
@@ -1096,7 +1277,8 @@ class LM_OT_hdri_clear(bpy.types.Operator):
 
         # Remove the environment chain (own mapping only, by marker name)
         for node in list(nodes):
-            if node.type == 'TEX_ENVIRONMENT' or node.name == 'HDRI Mapping':
+            if (node.type == 'TEX_ENVIRONMENT'
+                    or node.name in ('HDRI Mapping', LM_CAM_MIX, LM_CAM_PATH)):
                 nodes.remove(node)
 
         # Drop texture coordinate nodes left without links
@@ -1252,7 +1434,10 @@ classes = (
     LM_OT_toggle_settings,
     LM_OT_toggle_transform,
     LM_OT_hdri_pick_folder,
+    LM_OT_hdri_pick,
     LM_OT_hdri_apply,
+    LM_OT_hdri_prev,
+    LM_OT_hdri_next,
     LM_OT_hdri_clear,
     LM_OT_hdri_shift_rmb,
     LM_OT_ies_pick_folder,

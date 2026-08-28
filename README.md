@@ -1,4 +1,4 @@
-# LAMPOCHKA v2.3.1
+# LAMPOCHKA v2.4
 
 Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
 
@@ -45,12 +45,15 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 ### HDRI Browser (v2.1)
 - Collapsible **HDRI** sub-panel below the light list
 - Pick a folder — all `.exr` / `.hdr` files appear as a thumbnail grid
+- **Preview carousel (v2.4)** — one compact row of three cards (previous / active / next) with large previews; flip through the folder with the arrows, click a card to apply instantly
+- **Prev / Next arrows (v2.4)** — flip through the folder and apply each HDRI instantly, no need to hit Apply every time
 - **Apply HDRI** — builds the world node setup (TexCoord → Mapping → Environment → Background) in one click
 - If the world already has an environment setup, only the image is swapped — existing nodes are not destroyed
+- **Hide from Camera (v2.4)** — show a flat color to the camera instead of the HDRI (black by default) while lighting and reflections keep the HDRI; classic VFX trick for rendering on a clean plate
 - **Clear HDRI** — removes the HDRI node chain and leaves a plain Background (strength 1); rotation and strength reset in the panel
 - **Rotation** — rotate the environment (Z for turntable-style spin, X/Y for tilt)
 - **Strength** — environment intensity, live update
-- **Rotate: Shift+RMB (v2.3.1)** — toggle; when enabled, drag with **Shift + Right Mouse** in the viewport to spin the HDRI around Z. Esc resets. The toggle re-applies automatically in every new scene
+- **Rotate: Shift+RMB** — toggle; when enabled, drag with **Shift + Right Mouse** in the viewport to spin the HDRI around Z. Ctrl+Z undoes the whole drag. The toggle is always off in a fresh session (resets on every file load) so the default navigation is never hijacked unexpectedly
 - Rotation and strength apply to the HDRI node setup even after re-applying a different HDRI
 - **Remembered folder** — the last picked HDRI folder is stored in add-on preferences and auto-filled in every new project; an individual `.blend` can still override it with its own folder
 

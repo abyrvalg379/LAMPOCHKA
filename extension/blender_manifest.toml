@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "lampochka"
-version = "2.3.1"
+version = "2.4.0"
 name = "LAMPOCHKA"
 tagline = "Manage all lights and HDRI environments in the scene"
 maintainer = "Maksim Kovalev <maksim@example.com>"
