@@ -396,22 +396,55 @@ def get_lm_prefs(context):
         return None
 
 
+def _seed_scene_folder(scene_group, folder_attr):
+    """Live pickup: changing a default folder in preferences immediately
+    fills the still-empty folder of the current scene. Scenes that keep
+    their own folder are never overridden."""
+    try:
+        scene = getattr(bpy.context, "scene", None)
+        if scene is None:
+            return
+        scene_props = getattr(scene, scene_group, None)
+        prefs = get_lm_prefs(bpy.context)
+        if scene_props is None or prefs is None:
+            return
+        if not getattr(scene_props, folder_attr, "") and getattr(prefs, folder_attr, ""):
+            setattr(scene_props, folder_attr, getattr(prefs, folder_attr))
+    except Exception:
+        pass
+
+
+def _on_pref_hdri(self, context):
+    _seed_scene_folder("lm_hdri", "hdri_folder")
+
+
+def _on_pref_ies(self, context):
+    _seed_scene_folder("lm_ies", "ies_folder")
+
+
+def _on_pref_gobo(self, context):
+    _seed_scene_folder("lm_gobo", "gobo_folder")
+
+
 class LM_AddonPreferences(AddonPreferences):
     bl_idname = __package__
 
     hdri_folder: StringProperty(
         name="Default HDRI Folder",
         subtype='DIR_PATH',
+        update=_on_pref_hdri,
         description="Folder used when the current scene has no HDRI folder set",
     )
     ies_folder: StringProperty(
         name="Default IES Folder",
         subtype='DIR_PATH',
+        update=_on_pref_ies,
         description="Folder used when the current scene has no IES folder set",
     )
     gobo_folder: StringProperty(
         name="Default Gobo Folder",
         subtype='DIR_PATH',
+        update=_on_pref_gobo,
         description="Folder used when the current scene has no gobo folder set",
     )
 
