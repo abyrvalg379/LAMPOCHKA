@@ -2,10 +2,10 @@
 bl_info = {
     "name": "LAMPOCHKA",
     "author": "Maksim Kovalev",
-    "version": (3, 0, 0),
+    "version": (3, 1, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > LAMPOCHKA",
-    "description": "Manage all lights in the scene + HDRI/IES/Gobo browsers, sun helper, light linking",
+    "description": "Manage all lights in the scene + HDRI/IES/Gobo browsers, sun helper, light linking, presets",
     "doc_url": "https://github.com/abyrvalg379/lampochka",
     "license": "GPL-3.0-or-later",
     "category": "Lighting",
@@ -19,6 +19,9 @@ bl_info = {
 import json
 import math
 import os
+import re
+import getpass
+import datetime
 
 import bpy
 from mathutils import Vector
@@ -426,6 +429,10 @@ def _on_pref_gobo(self, context):
     _seed_scene_folder("lm_gobo", "gobo_folder")
 
 
+def _on_pref_presets(self, context):
+    _seed_scene_folder("lm_presets", "preset_folder")
+
+
 class LM_AddonPreferences(AddonPreferences):
     bl_idname = __package__
 
@@ -447,12 +454,20 @@ class LM_AddonPreferences(AddonPreferences):
         update=_on_pref_gobo,
         description="Folder used when the current scene has no gobo folder set",
     )
+    presets_folder: StringProperty(
+        name="Default Presets Folder",
+        subtype='DIR_PATH',
+        update=_on_pref_presets,
+        description="Folder used when the current scene has no presets "
+                    "folder set",
+    )
 
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "hdri_folder")
         layout.prop(self, "ies_folder")
         layout.prop(self, "gobo_folder")
+        layout.prop(self, "presets_folder")
 
 
 @persistent
@@ -475,6 +490,9 @@ def load_post_handler(dummy):
         if hasattr(scene, "lm_gobo") and not scene.lm_gobo.gobo_folder:
             if prefs.gobo_folder:
                 scene.lm_gobo.gobo_folder = prefs.gobo_folder
+        if hasattr(scene, "lm_presets") and not scene.lm_presets.preset_folder:
+            if prefs.presets_folder:
+                scene.lm_presets.preset_folder = prefs.presets_folder
         # Rotate toggle is always off in a fresh session — otherwise users
         # forget Shift+RMB is hijacked and blame the default navigation
         if hasattr(scene, "lm_hdri"):
@@ -1043,9 +1061,8 @@ def _gobo_cleanup_orphans(nodes):
             nodes.remove(node)
 
 
-def _gobo_apply_image(context, filepath):
-    """Build or update the gobo projection chain on the active spot light."""
-    obj = context.active_object
+def _lm_apply_gobo(obj, filepath):
+    """Build or update the gobo projection chain on this light object."""
     light = get_obj_light(obj)
     if light is None:
         return {'CANCELLED'}
@@ -1125,14 +1142,25 @@ def _gobo_apply_image(context, filepath):
             if src is not None:
                 links.new(src, mix.inputs['Color1'])
             mix.inputs['Fac'].default_value = 1.0
+    return {'FINISHED'}
 
+
+def _gobo_apply_image(context, filepath):
+    obj = context.active_object
+    rv = _lm_apply_gobo(obj, filepath)
+    if rv != {'FINISHED'}:
+        return rv
+    # scene-wide gobo rotation/scale onto the just-updated mapping
+    light = get_obj_light(obj)
+    if light is None or not light.use_nodes or light.node_tree is None:
+        return rv
     gobo = context.scene.lm_gobo
-    mapping = nodes.get(LM_GOBO_MAPPING)
+    mapping = light.node_tree.nodes.get(LM_GOBO_MAPPING)
     if mapping is not None and mapping.type == 'MAPPING':
         mapping.inputs['Rotation'].default_value[2] = math.radians(gobo.rotation)
         s = max(0.01, gobo.scale)
         mapping.inputs['Scale'].default_value = (s, s, s)
-    return {'FINISHED'}
+    return rv
 
 
 def _gobo_remove(context):
@@ -1273,6 +1301,379 @@ class LM_PT_GoboPanel(bpy.types.Panel):
         col.separator()
         col.prop(gobo, "rotation")
         col.prop(gobo, "scale")
+
+
+# ---------------------------------------------------------------------------
+#  Light setup presets — save the scene's lights as JSON, apply them back
+# ---------------------------------------------------------------------------
+
+LM_PRESET_PROP = 'lm_preset'
+PRESET_EXTENSIONS = ('.json',)
+_presets_pcoll = None
+_presets_enum_cache = []
+_presets_cache_folder = None
+
+_DEFAULT_LIGHT_BASES = {'point', 'spot', 'area', 'sun', 'light', 'lamp',
+                        'point_light', 'spot_light', 'area_light',
+                        'sun_light', 'lamp_light'}
+
+
+def _safe_filename(name):
+    """Strip filesystem-hostile characters from a setup name."""
+    cleaned = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+    return cleaned or "setup"
+
+
+def _is_default_light_name(name):
+    """True for Blender-style default names: Point, Light.001, SPOT_Light..."""
+    return re.match(r'^(point|spot|area|sun|light|lamp|point_light|'
+                    r'spot_light|area_light|sun_light)(\.\d+)?$',
+                    name.strip(), re.IGNORECASE) is not None
+
+
+def _collect_lights_json(scene):
+    """Serialize scene lights to preset entries. Returns (entries, offenders)
+    — offenders are lights still carrying Blender default names."""
+    entries, offenders = [], []
+    for ob in scene.objects:
+        if ob.type != 'LIGHT':
+            continue
+        if _is_default_light_name(ob.name):
+            offenders.append(ob.name)
+            continue
+        data = ob.data
+        entry = {
+            "name": ob.name,
+            "type": data.type,
+            "energy": data.energy,
+            "color": [round(c, 5) for c in data.color],
+            "use_shadow": data.use_shadow,
+            "location": [round(v, 5) for v in ob.location],
+            "rotation": [round(v, 5) for v in ob.rotation_euler],
+        }
+        for key in ("diffuse_factor", "specular_factor", "volume_factor"):
+            value = getattr(data, key, None)
+            if value is not None:
+                entry[key] = value
+        if data.type == 'POINT':
+            entry["shadow_soft_size"] = data.shadow_soft_size
+        elif data.type == 'SPOT':
+            entry["spot_size"] = round(math.degrees(data.spot_size), 3)
+            entry["spot_blend"] = data.spot_blend
+            entry["shadow_soft_size"] = data.shadow_soft_size
+        elif data.type == 'AREA':
+            entry["shape"] = data.shape
+            entry["size"] = data.size
+            if data.shape in {'RECTANGLE', 'ELLIPSE'}:
+                entry["size_y"] = data.size_y
+        elif data.type == 'SUN':
+            entry["angle"] = round(math.degrees(data.angle), 3)
+        try:
+            if ob.lm_use_temperature:
+                entry["kelvin"] = ob.lm_temperature
+        except Exception:
+            pass
+        if data.use_nodes and data.node_tree is not None:
+            ies = data.node_tree.nodes.get('LM IES')
+            if ies is not None and ies.type == 'TEX_IES' and ies.filepath:
+                entry["ies_path"] = bpy.path.abspath(ies.filepath)
+            gobo = data.node_tree.nodes.get(LM_GOBO_IMAGE)
+            if (gobo is not None and gobo.type == 'TEX_IMAGE'
+                    and gobo.image is not None and gobo.image.filepath):
+                entry["gobo_path"] = bpy.path.abspath(gobo.image.filepath)
+        entries.append(entry)
+    return entries, offenders
+
+
+def _apply_preset_light(entry, marker, scene, missing):
+    """Create one light from a preset entry; registers missing files."""
+    name = str(entry.get("name", "Light"))
+    ltype = entry.get("type")
+    data = bpy.data.lights.new(name=name, type=ltype)
+    data.energy = float(entry.get("energy", 100.0))
+    color = entry.get("color")
+    if isinstance(color, (list, tuple)) and len(color) >= 3:
+        data.color = color[:3]
+    data.use_shadow = bool(entry.get("use_shadow", True))
+    for key in ("diffuse_factor", "specular_factor", "volume_factor"):
+        if key in entry and hasattr(data, key):
+            setattr(data, key, entry[key])
+    if ltype == 'POINT':
+        data.shadow_soft_size = float(entry.get("shadow_soft_size", 0.1))
+    elif ltype == 'SPOT':
+        data.spot_size = math.radians(float(entry.get("spot_size", 45.0)))
+        data.spot_blend = float(entry.get("spot_blend", 0.15))
+        data.shadow_soft_size = float(entry.get("shadow_soft_size", 0.1))
+    elif ltype == 'AREA':
+        shape = entry.get("shape", 'SQUARE')
+        try:
+            data.shape = shape
+        except Exception:
+            pass
+        data.size = float(entry.get("size", 0.5))
+        if shape in {'RECTANGLE', 'ELLIPSE'}:
+            data.size_y = float(entry.get("size_y", data.size))
+    elif ltype == 'SUN':
+        data.angle = math.radians(float(entry.get("angle", 0.526)))
+
+    obj = bpy.data.objects.new(name=name, object_data=data)
+    scene.collection.objects.link(obj)
+    obj[LM_PRESET_PROP] = marker
+    obj.location = list(entry.get("location", (0.0, 0.0, 0.0)))
+    rot = entry.get("rotation")
+    if isinstance(rot, (list, tuple)) and len(rot) >= 3:
+        obj.rotation_euler = rot[:3]
+    kelvin = entry.get("kelvin")
+    if kelvin:
+        try:
+            obj.lm_temperature = float(kelvin)
+        except Exception:
+            pass
+    ies_path = entry.get("ies_path")
+    if ies_path:
+        if os.path.isfile(ies_path):
+            _lm_apply_ies(data, ies_path)
+        else:
+            missing.append(ies_path)
+    gobo_path = entry.get("gobo_path")
+    if gobo_path:
+        if ltype != 'SPOT':
+            missing.append(gobo_path + " (gobo needs a spot)")
+        elif os.path.isfile(gobo_path):
+            _lm_apply_gobo(obj, gobo_path)
+        else:
+            missing.append(gobo_path)
+    return obj
+
+
+def preset_enum_items(self, context):
+    """Dynamic enum items for preset JSON files; thumbnails from
+    thumbnails/<name>.png|jpg when present."""
+    global _presets_cache_folder
+    folder = self.preset_folder
+
+    if _presets_cache_folder == folder and _presets_enum_cache:
+        return _presets_enum_cache
+
+    if _presets_pcoll is not None and _presets_cache_folder != folder:
+        _presets_pcoll.clear()
+
+    _presets_enum_cache.clear()
+    _presets_cache_folder = folder
+
+    if not folder or not os.path.isdir(folder) or _presets_pcoll is None:
+        return _presets_enum_cache
+
+    try:
+        files = sorted(f for f in os.listdir(folder)
+                       if f.lower().endswith(PRESET_EXTENSIONS))
+    except OSError:
+        return _presets_enum_cache
+
+    for filename in files:
+        filepath = os.path.join(folder, filename)
+        name = os.path.splitext(filename)[0]
+        icon = 'FILE'
+        thumb = _ies_thumbnail(folder, name)
+        if thumb is not None:
+            try:
+                icon = _presets_pcoll.load(thumb, thumb, 'IMAGE').icon_id
+            except Exception:
+                icon = 'FILE'
+        _presets_enum_cache.append(
+            (filepath, name, filepath, icon, len(_presets_enum_cache)))
+
+    return _presets_enum_cache
+
+
+class LM_PresetSettings(PropertyGroup):
+    preset_folder: StringProperty(
+        name="Presets Folder",
+        subtype='DIR_PATH',
+        description="Folder containing light setup presets (.json)",
+    )
+    selected_preset: EnumProperty(
+        name="Preset",
+        items=preset_enum_items,
+        description="Presets found in the folder",
+    )
+    replace_lights: BoolProperty(
+        name="Replace scene lights",
+        description="Remove lights created by the previous preset apply "
+                    "before creating new ones",
+        default=True,
+    )
+    preset_name: StringProperty(
+        name="Name",
+        description="Name of the setup to save (meaningful names only: "
+                    "Key, Rim, Fill — not Point.001)",
+    )
+
+
+class LM_OT_preset_pick_folder(bpy.types.Operator, ImportHelper):
+    """Pick a folder containing light setup presets."""
+    bl_idname = "light_manager.preset_pick_folder"
+    bl_label = "Pick Presets Folder"
+    bl_options = {'REGISTER'}
+
+    filename_ext = ""
+    use_filter_folder = True
+
+    def execute(self, context):
+        folder = os.path.dirname(self.filepath)
+        context.scene.lm_presets.preset_folder = folder
+        prefs = get_lm_prefs(context)
+        if prefs is not None:
+            prefs.presets_folder = folder
+        return {'FINISHED'}
+
+
+class LM_OT_preset_save(bpy.types.Operator):
+    """Save the scene's lights as a JSON preset."""
+    bl_idname = "light_manager.preset_save"
+    bl_label = "Save Setup"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return any(ob.type == 'LIGHT' for ob in context.scene.objects)
+
+    def execute(self, context):
+        presets = context.scene.lm_presets
+        name = (presets.preset_name or "").strip()
+        if not name:
+            self.report({'ERROR'}, "Give the setup a name first")
+            return {'CANCELLED'}
+        folder = presets.preset_folder
+        if not folder or not os.path.isdir(folder):
+            self.report({'ERROR'}, "Pick a preset folder first")
+            return {'CANCELLED'}
+
+        lights, offenders = _collect_lights_json(context.scene)
+        if offenders:
+            self.report({'ERROR'},
+                        "Rename default light names first: "
+                        + ", ".join(offenders[:5]))
+            return {'CANCELLED'}
+        if not lights:
+            self.report({'ERROR'}, "No lights to save")
+            return {'CANCELLED'}
+
+        try:
+            author = getpass.getuser()
+        except Exception:
+            author = ""
+        manifest = {
+            "version": 1,
+            "app": "LAMPOCHKA 3.1",
+            "author": author,
+            "created": datetime.datetime.now().isoformat(timespec="seconds"),
+            "lights": lights,
+        }
+        filepath = os.path.join(folder, _safe_filename(name) + ".json")
+        overwritten = os.path.isfile(filepath)
+        with open(filepath, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        presets.preset_name = ""
+        global _presets_cache_folder
+        _presets_cache_folder = None    # force the enum rescan
+        self.report({'INFO'}, "Saved: " + os.path.basename(filepath)
+                    + (" (overwritten)" if overwritten else ""))
+        return {'FINISHED'}
+
+
+class LM_OT_preset_apply(bpy.types.Operator):
+    """Create the lights stored in the selected preset."""
+    bl_idname = "light_manager.preset_apply"
+    bl_label = "Apply Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        presets = context.scene.lm_presets
+        return bool(presets.selected_preset)
+
+    def execute(self, context):
+        presets = context.scene.lm_presets
+        filepath = presets.selected_preset
+        if not filepath or not os.path.isfile(filepath):
+            self.report({'ERROR'}, "No valid preset selected")
+            return {'CANCELLED'}
+        try:
+            with open(filepath, encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except (OSError, ValueError) as ex:
+            self.report({'ERROR'}, f"Bad preset file: {ex}")
+            return {'CANCELLED'}
+        entries = manifest.get("lights") if isinstance(manifest, dict) else None
+        entries = [e for e in (entries or [])
+                   if isinstance(e, dict) and e.get("name")
+                   and e.get("type") in {'POINT', 'SUN', 'SPOT', 'AREA'}]
+        if not entries:
+            self.report({'ERROR'}, "No lights in the preset")
+            return {'CANCELLED'}
+        marker = os.path.splitext(os.path.basename(filepath))[0]
+
+        if presets.replace_lights:
+            doomed = [ob for ob in context.scene.objects
+                      if ob.type == 'LIGHT' and ob.get(LM_PRESET_PROP, 0) == 1]
+            for ob in doomed:
+                bpy.data.objects.remove(ob, do_unlink=True)
+
+        missing = []
+        for entry in entries:
+            _apply_preset_light(entry, marker, context.scene, missing)
+        if missing:
+            self.report({'WARNING'},
+                        f"Applied {len(entries)} lights; missing files: "
+                        + ", ".join(os.path.basename(m) for m in missing))
+        else:
+            self.report({'INFO'}, f"Applied {len(entries)} lights")
+        return {'FINISHED'}
+
+
+class LM_PT_PresetsPanel(bpy.types.Panel):
+    bl_label = "Presets"
+    bl_idname = "LM_PT_presets_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "LAMPOCHKA"
+    bl_parent_id = "LM_PT_main_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        presets = context.scene.lm_presets
+
+        row = layout.row(align=True)
+        row.prop(presets, "preset_folder", text="")
+        row.operator("light_manager.preset_pick_folder", text="",
+                     icon='FILE_FOLDER')
+
+        if not presets.preset_folder or not os.path.isdir(presets.preset_folder):
+            layout.label(text="Pick a folder with preset .json files",
+                         icon='INFO')
+            return
+
+        _ = presets.selected_preset
+        if not _presets_enum_cache:
+            layout.label(text="No presets in folder", icon='INFO')
+            return
+
+        layout.template_icon_view(presets, "selected_preset",
+                                  show_labels=True, scale=4)
+
+        if presets.selected_preset:
+            name = os.path.splitext(os.path.basename(presets.selected_preset))[0]
+            layout.label(text=name, icon='FILE')
+
+        layout.prop(presets, "replace_lights")
+
+        col = layout.column(align=True)
+        col.prop(presets, "preset_name", text="")
+        col.operator("light_manager.preset_save", text="Save Setup",
+                     icon='EXPORT')
+        col.operator("light_manager.preset_apply", icon='CHECKMARK')
 
 
 # ---------------------------------------------------------------------------
@@ -2471,6 +2872,50 @@ class LM_OT_ies_pick_folder(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+def _lm_apply_ies(light, filepath):
+    """Swap or build the 'LM IES' node chain on this light data."""
+    light.use_nodes = True
+    nodes = light.node_tree.nodes
+    links = light.node_tree.links
+
+    existing = nodes.get('LM IES')
+    if existing is not None and existing.type == 'TEX_IES':
+        # Light already has our IES setup — swap the file only
+        existing.filepath = filepath
+        return
+
+    emission = next((n for n in nodes if n.type == 'EMISSION'), None)
+    output = next((n for n in nodes if n.type == 'OUTPUT_LIGHT'), None)
+
+    if emission is None or output is None:
+        # No usable chain — build a clean IES setup
+        nodes.clear()
+        node_ies = nodes.new('ShaderNodeTexIES')
+        emission = nodes.new('ShaderNodeEmission')
+        output = nodes.new('ShaderNodeOutputLight')
+
+        node_ies.name = 'LM IES'
+        node_ies.label = 'LM IES'
+        node_ies.mode = 'EXTERNAL'
+        node_ies.filepath = filepath
+
+        node_ies.location = (-200, 0)
+        emission.location = (0, 0)
+        output.location = (200, 0)
+
+        links.new(node_ies.outputs['Fac'], emission.inputs['Strength'])
+        links.new(emission.outputs['Emission'], output.inputs['Surface'])
+    else:
+        # Existing Emission chain — insert the IES node before Strength
+        node_ies = nodes.new('ShaderNodeTexIES')
+        node_ies.name = 'LM IES'
+        node_ies.label = 'LM IES'
+        node_ies.mode = 'EXTERNAL'
+        node_ies.filepath = filepath
+        node_ies.location = (emission.location.x - 200, emission.location.y)
+        links.new(node_ies.outputs['Fac'], emission.inputs['Strength'])
+
+
 class LM_OT_ies_apply(bpy.types.Operator):
     """Apply the selected IES profile to the active light."""
     bl_idname = "light_manager.ies_apply"
@@ -2490,49 +2935,7 @@ class LM_OT_ies_apply(bpy.types.Operator):
             self.report({'ERROR'}, "No valid IES selected")
             return {'CANCELLED'}
 
-        light = context.active_object.data
-        light.use_nodes = True
-        nodes = light.node_tree.nodes
-        links = light.node_tree.links
-
-        existing = nodes.get('LM IES')
-        if existing is not None and existing.type == 'TEX_IES':
-            # Light already has our IES setup — swap the file only
-            existing.filepath = filepath
-            self.report({'INFO'}, "IES swapped: " + os.path.basename(filepath))
-            return {'FINISHED'}
-
-        emission = next((n for n in nodes if n.type == 'EMISSION'), None)
-        output = next((n for n in nodes if n.type == 'OUTPUT_LIGHT'), None)
-
-        if emission is None or output is None:
-            # No usable chain — build a clean IES setup
-            nodes.clear()
-            node_ies = nodes.new('ShaderNodeTexIES')
-            emission = nodes.new('ShaderNodeEmission')
-            output = nodes.new('ShaderNodeOutputLight')
-
-            node_ies.name = 'LM IES'
-            node_ies.label = 'LM IES'
-            node_ies.mode = 'EXTERNAL'
-            node_ies.filepath = filepath
-
-            node_ies.location = (-200, 0)
-            emission.location = (0, 0)
-            output.location = (200, 0)
-
-            links.new(node_ies.outputs['Fac'], emission.inputs['Strength'])
-            links.new(emission.outputs['Emission'], output.inputs['Surface'])
-        else:
-            # Existing Emission chain — insert the IES node before Strength
-            node_ies = nodes.new('ShaderNodeTexIES')
-            node_ies.name = 'LM IES'
-            node_ies.label = 'LM IES'
-            node_ies.mode = 'EXTERNAL'
-            node_ies.filepath = filepath
-            node_ies.location = (emission.location.x - 200, emission.location.y)
-            links.new(node_ies.outputs['Fac'], emission.inputs['Strength'])
-
+        _lm_apply_ies(context.active_object.data, filepath)
         self.report({'INFO'}, "IES applied: " + os.path.basename(filepath))
         return {'FINISHED'}
 
@@ -2569,6 +2972,7 @@ classes = (
     LM_IESSettings,
     LM_GoboSettings,
     LM_SunSettings,
+    LM_PresetSettings,
     LM_AddonPreferences,
     LM_OT_select_light,
     LM_OT_toggle_visibility,
@@ -2595,6 +2999,9 @@ classes = (
     LM_OT_gobo_pick_folder,
     LM_OT_gobo_apply,
     LM_OT_gobo_remove,
+    LM_OT_preset_pick_folder,
+    LM_OT_preset_save,
+    LM_OT_preset_apply,
     LM_OT_link_pick,
     LM_OT_link_clear,
     LM_OT_place_toggle,
@@ -2604,12 +3011,13 @@ classes = (
     LM_PT_HDRIPanel,
     LM_PT_IESPanel,
     LM_PT_GoboPanel,
+    LM_PT_PresetsPanel,
     LM_PT_SunPanel,
 )
 
 
 def register():
-    global _hdri_pcoll, _ies_pcoll, _gobo_pcoll
+    global _hdri_pcoll, _ies_pcoll, _gobo_pcoll, _presets_pcoll
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.lm_settings = bpy.props.PointerProperty(type=LM_SceneSettings)
@@ -2617,6 +3025,7 @@ def register():
     bpy.types.Scene.lm_ies = bpy.props.PointerProperty(type=LM_IESSettings)
     bpy.types.Scene.lm_gobo = bpy.props.PointerProperty(type=LM_GoboSettings)
     bpy.types.Scene.lm_sun = bpy.props.PointerProperty(type=LM_SunSettings)
+    bpy.types.Scene.lm_presets = bpy.props.PointerProperty(type=LM_PresetSettings)
     # Per-object Kelvin controls (stored as ID props on the light object)
     bpy.types.Object.lm_use_temperature = bpy.props.BoolProperty(
         name="Kelvin",
@@ -2661,12 +3070,14 @@ def register():
             _ies_pcoll = previews.new()
         if _gobo_pcoll is None:
             _gobo_pcoll = previews.new()
+        if _presets_pcoll is None:
+            _presets_pcoll = previews.new()
     # Shift+RMB HDRI rotation keymap (always on, operator poll gates the toggle)
     register_shift_rmb_keymap()
 
 
 def unregister():
-    global _hdri_pcoll, _ies_pcoll, _gobo_pcoll
+    global _hdri_pcoll, _ies_pcoll, _gobo_pcoll, _presets_pcoll
     # Remove the Shift+RMB keymap
     unregister_shift_rmb_keymap()
     # Remove sync handler
@@ -2679,7 +3090,7 @@ def unregister():
     if sun_frame_handler in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(sun_frame_handler)
     previews = getattr(bpy.utils, "previews", None)
-    for name in ("_hdri_pcoll", "_ies_pcoll", "_gobo_pcoll"):
+    for name in ("_hdri_pcoll", "_ies_pcoll", "_gobo_pcoll", "_presets_pcoll"):
         pcoll = globals()[name]
         if pcoll is not None and previews is not None:
             try:
@@ -2690,10 +3101,12 @@ def unregister():
     _hdri_enum_cache.clear()
     _ies_enum_cache.clear()
     _gobo_enum_cache.clear()
+    _presets_enum_cache.clear()
     global _hdri_cache_folder, _ies_cache_folder, _gobo_cache_folder
     _hdri_cache_folder = None
     _ies_cache_folder = None
     _gobo_cache_folder = None
+    _presets_cache_folder = None
     try:
         del bpy.types.Scene.lm_gobo
     except Exception:
@@ -2708,6 +3121,10 @@ def unregister():
         pass
     try:
         del bpy.types.Scene.lm_sun
+    except Exception:
+        pass
+    try:
+        del bpy.types.Scene.lm_presets
     except Exception:
         pass
     try:
