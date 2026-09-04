@@ -2572,6 +2572,15 @@ class LM_PT_IESPanel(bpy.types.Panel):
         if context.engine != 'CYCLES':
             layout.label(text="IES works in Cycles only", icon='ERROR')
 
+        obj = context.active_object
+        light = get_obj_light(obj) if obj is not None else None
+        if light is None:
+            layout.label(text="Select a light in the list above", icon='INFO')
+        elif light.type not in ('POINT', 'SPOT'):
+            layout.label(text="IES needs a Point or Spot light "
+                              "(this one is %s)" % light.type.title(),
+                         icon='INFO')
+
         layout.template_icon_view(ies, "selected_ies", show_labels=True, scale=4)
 
         if ies.selected_ies:
