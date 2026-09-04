@@ -115,6 +115,7 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 ### Gobo Projection (v3)
 - Collapsible **Gobo** sub-panel: project a texture from the active **spot light** (Cycles)
 - Pick a folder — textures appear as a thumbnail grid, click Apply
+- Works on **any active light**: spots get the classic cone projection, areas get a planar "patterned softbox", points are converted to spots automatically on Apply (suns are refused — no position, no projection)
 - Built on **the active light**: if the light has no node setup, a clean `TexCoord → Mapping → Image → Emission → Output` chain is built; if it already has an Emission chain, the gobo is multiplied in without destroying nodes
 - **Rotation / Scale** sliders drive the projection mapping live
 - **Remove Gobo** strips the gobo nodes and restores the previous color source

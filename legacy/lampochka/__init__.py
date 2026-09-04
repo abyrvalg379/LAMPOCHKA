@@ -1215,7 +1215,9 @@ class LM_OT_gobo_pick_folder(bpy.types.Operator, ImportHelper):
 
 
 class LM_OT_gobo_apply(bpy.types.Operator):
-    """Project the selected gobo texture from the active spot light."""
+    """Project the selected gobo texture from the active light.
+    Spots get a cone projection, areas a patterned plane; points are
+    converted to spots (a gobo on an omni light does not exist)."""
     bl_idname = "light_manager.gobo_apply"
     bl_label = "Apply Gobo"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1223,8 +1225,7 @@ class LM_OT_gobo_apply(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return (obj is not None and obj.type == 'LIGHT'
-                and obj.data.type == 'SPOT')
+        return obj is not None and obj.type == 'LIGHT'
 
     def execute(self, context):
         gobo = context.scene.lm_gobo
@@ -1232,6 +1233,15 @@ class LM_OT_gobo_apply(bpy.types.Operator):
         if not filepath or not os.path.isfile(filepath):
             self.report({'ERROR'}, "No valid gobo texture selected")
             return {'CANCELLED'}
+        obj = context.active_object
+        if obj.data.type == 'SUN':
+            self.report({'ERROR'},
+                        "Gobo needs a cone — a Sun light has no position")
+            return {'CANCELLED'}
+        if obj.data.type == 'POINT':
+            obj.data.type = 'SPOT'
+            self.report({'INFO'},
+                        f"{obj.name}: Point converted to Spot for the gobo")
         rv = _gobo_apply_image(context, filepath)
         if rv == {'FINISHED'}:
             self.report({'INFO'},
@@ -1286,8 +1296,14 @@ class LM_PT_GoboPanel(bpy.types.Panel):
 
         obj = context.active_object
         light = get_obj_light(obj) if obj is not None else None
-        if light is None or light.type != 'SPOT':
-            layout.label(text="Pick a spot light (gobo needs a cone)", icon='INFO')
+        if light is None or light.type == 'SUN':
+            layout.label(text="Select a spot/area/point light for the gobo",
+                         icon='INFO')
+        elif light.type == 'POINT':
+            layout.label(text="Point will be converted to Spot on Apply",
+                         icon='INFO')
+        elif light.type == 'AREA':
+            layout.label(text="Area: planar gobo projection", icon='INFO')
 
         layout.template_icon_view(gobo, "selected_gobo", show_labels=True, scale=4)
 
