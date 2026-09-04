@@ -1,3 +1,8 @@
 # Reference addons (commercial) — never push to GitHub
-ref/
+*.pyc
 __pycache__/
+__pycache__/
+presets/
+ref/
+ref/
+src/ref/

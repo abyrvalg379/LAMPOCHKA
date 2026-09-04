@@ -2,7 +2,7 @@
 bl_info = {
     "name": "LAMPOCHKA",
     "author": "Maksim Kovalev",
-    "version": (3, 1, 0),
+    "version": (3, 1, 1),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar (N) > LAMPOCHKA",
     "description": "Manage all lights in the scene + HDRI/IES/Gobo browsers, sun helper, light linking, presets",
@@ -1385,7 +1385,7 @@ def _collect_lights_json(scene):
     return entries, offenders
 
 
-def _apply_preset_light(entry, marker, scene, missing):
+def _apply_preset_light(entry, marker, scene, missing, parent=None):
     """Create one light from a preset entry; registers missing files."""
     name = str(entry.get("name", "Light"))
     ltype = entry.get("type")
@@ -1419,6 +1419,8 @@ def _apply_preset_light(entry, marker, scene, missing):
     obj = bpy.data.objects.new(name=name, object_data=data)
     scene.collection.objects.link(obj)
     obj[LM_PRESET_PROP] = marker
+    if parent is not None:
+        obj.parent = parent
     obj.location = list(entry.get("location", (0.0, 0.0, 0.0)))
     rot = entry.get("rotation")
     if isinstance(rot, (list, tuple)) and len(rot) >= 3:
@@ -1496,12 +1498,6 @@ class LM_PresetSettings(PropertyGroup):
         name="Preset",
         items=preset_enum_items,
         description="Presets found in the folder",
-    )
-    replace_lights: BoolProperty(
-        name="Replace scene lights",
-        description="Remove lights created by the previous preset apply "
-                    "before creating new ones",
-        default=True,
     )
     preset_name: StringProperty(
         name="Name",
@@ -1582,6 +1578,32 @@ class LM_OT_preset_save(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LM_OT_clear_lights(bpy.types.Operator):
+    """Remove lights created by LAMPOCHKA presets (lm_preset marker)."""
+    bl_idname = "light_manager.clear_lights"
+    bl_label = "Clear Lights"
+    bl_description = "Remove all lights that came from a LAMPOCHKA preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return any((ob.type == 'LIGHT' or ob.type == 'EMPTY')
+                   and ob.get(LM_PRESET_PROP, 0) == 1
+                   for ob in context.scene.objects)
+
+    def execute(self, context):
+        doomed = [ob for ob in context.scene.objects
+                  if (ob.type == 'LIGHT' or ob.type == 'EMPTY')
+                  and ob.get(LM_PRESET_PROP, 0) == 1]
+        if not doomed:
+            self.report({'WARNING'}, "No lights from a LAMPOCHKA preset")
+            return {'CANCELLED'}
+        for ob in doomed:
+            bpy.data.objects.remove(ob, do_unlink=True)
+        self.report({'INFO'}, f"Removed {len(doomed)} preset light(s)")
+        return {'FINISHED'}
+
+
 class LM_OT_preset_apply(bpy.types.Operator):
     """Create the lights stored in the selected preset."""
     bl_idname = "light_manager.preset_apply"
@@ -1614,15 +1636,21 @@ class LM_OT_preset_apply(bpy.types.Operator):
             return {'CANCELLED'}
         marker = os.path.splitext(os.path.basename(filepath))[0]
 
-        if presets.replace_lights:
-            doomed = [ob for ob in context.scene.objects
-                      if ob.type == 'LIGHT' and ob.get(LM_PRESET_PROP, 0) == 1]
-            for ob in doomed:
-                bpy.data.objects.remove(ob, do_unlink=True)
+        doomed = [ob for ob in context.scene.objects
+                  if ob.type == 'LIGHT' and ob.get(LM_PRESET_PROP, 0) == 1]
+        empties = [ob for ob in context.scene.objects
+                   if ob.type == 'EMPTY' and ob.get(LM_PRESET_PROP, 0) == 1]
+        for ob in doomed + empties:
+            bpy.data.objects.remove(ob, do_unlink=True)
+
+        empty = bpy.data.objects.new(name=marker, object_data=None)
+        empty.empty_display_type = 'PLAIN_AXES'
+        empty[LM_PRESET_PROP] = 1
+        context.scene.collection.objects.link(empty)
 
         missing = []
         for entry in entries:
-            _apply_preset_light(entry, marker, context.scene, missing)
+            _apply_preset_light(entry, marker, context.scene, missing, parent=empty)
         if missing:
             self.report({'WARNING'},
                         f"Applied {len(entries)} lights; missing files: "
@@ -1667,12 +1695,11 @@ class LM_PT_PresetsPanel(bpy.types.Panel):
             name = os.path.splitext(os.path.basename(presets.selected_preset))[0]
             layout.label(text=name, icon='FILE')
 
-        layout.prop(presets, "replace_lights")
-
         col = layout.column(align=True)
         col.prop(presets, "preset_name", text="")
         col.operator("light_manager.preset_save", text="Save Setup",
                      icon='EXPORT')
+        col.operator("light_manager.clear_lights", icon='X')
         col.operator("light_manager.preset_apply", icon='CHECKMARK')
 
 
@@ -3002,6 +3029,7 @@ classes = (
     LM_OT_preset_pick_folder,
     LM_OT_preset_save,
     LM_OT_preset_apply,
+    LM_OT_clear_lights,
     LM_OT_link_pick,
     LM_OT_link_clear,
     LM_OT_place_toggle,

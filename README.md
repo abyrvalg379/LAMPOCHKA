@@ -87,6 +87,15 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - IES profiles work in **Cycles only** (the panel warns when another engine is active)
 - The last picked folder is remembered in preferences, same as HDRI
 
+### Light Setup Presets (v3.1)
+- Collapsible **Presets** sub-panel: save the whole light setup of the scene as a JSON file and load it into any scene later
+- Pick a presets folder — `.json` setups appear as a grid (optional previews from `thumbnails/<name>.png`)
+- **Save Setup** — writes every scene light to JSON: type, power, color/Kelvin, size parameters, transforms, shadow, IES/gobo paths. Use meaningful names for your lights (Key, Rim, Fill) — the preset reads as a lighting scheme
+- **Apply** — creates the lights from the selected preset, marked and grouped under a `lm_preset` empty; applying another preset replaces the previous preset lights (your own lights are never touched)
+- **Clear Lights** — removes all lights that came from a LAMPOCHKA preset
+- Missing IES/gobo files are reported on apply instead of failing silently
+- Personal library conversion: any folder of `.blend` files with light rigs (e.g. your own Pro-Lighting Studio library) can be converted to JSON presets with the included `convert_presets.py` (runs headless); each named collection becomes its own preset. Not for redistributing third-party libraries
+
 ### Interactive Placement (v3)
 - **Cursor button** on each light row is the master switch, manual only:
   - **ON** — the light follows the cursor freely (no snapping), viewport navigation keeps working

@@ -1238,6 +1238,47 @@ check("place: size key POINT renamed radius fallback", ns["_light_size_key"](
 check("place: size key missing -> None", ns["_light_size_key"](
     types.SimpleNamespace(data=types.SimpleNamespace(type='POINT'))) is None)
 
+# ---------------------------------------------------------------- clear lights
+removed_cl = []
+bpy.data.objects = types.SimpleNamespace(
+    remove=lambda o, do_unlink=False: removed_cl.append(o))
+
+cl_obj1 = FakeObj('LIGHT', name="preset_A")
+cl_obj1["lm_preset"] = 1
+cl_obj2 = FakeObj('LIGHT', name="manual_B")
+cl_obj3 = FakeObj('LIGHT', name="preset_C")
+cl_obj3["lm_preset"] = 1
+cl_obj4 = FakeObj('LIGHT', name="manual_D")
+cl_empty = FakeObj('EMPTY', name="preset_group")
+cl_empty["lm_preset"] = 1
+cl_scene = types.SimpleNamespace(objects=[cl_obj1, cl_obj2, cl_obj3, cl_obj4, cl_empty])
+bpy.context = types.SimpleNamespace(scene=cl_scene)
+
+ClearLightsOp = ns["LM_OT_clear_lights"]
+
+check("clear_lights poll: True when preset lights exist",
+      ClearLightsOp.poll(bpy.context) is True)
+cl_scene.objects = [cl_obj2, cl_obj4]
+check("clear_lights poll: False when no preset lights",
+      ClearLightsOp.poll(bpy.context) is False)
+cl_scene.objects = [cl_obj1, cl_obj2, cl_obj3, cl_obj4, cl_empty]
+removed_cl.clear()
+clop = ClearLightsOp()
+clop.report = lambda t, m: None
+rv = clop.execute(bpy.context)
+check("clear_lights: FINISHED", rv == {'FINISHED'})
+check("clear_lights: removed 2 lights + 1 empty",
+      len(removed_cl) == 3
+      and {o.name for o in removed_cl} == {"preset_A", "preset_C", "preset_group"})
+check("clear_lights: manual lights untouched",
+      cl_obj2 in cl_scene.objects and cl_obj4 in cl_scene.objects)
+cl_scene.objects = [cl_obj2, cl_obj4]
+removed_cl.clear()
+rv = clop.execute(bpy.context)
+check("clear_lights: CANCELLED when no preset lights left",
+      rv == {'CANCELLED'} and len(removed_cl) == 0)
+bpy.data.objects = None
+
 # ---------------------------------------------------------------- unregister
 try:
     ns["unregister"]()
