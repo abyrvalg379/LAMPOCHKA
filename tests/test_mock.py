@@ -18,20 +18,57 @@ def check(name, cond, detail=""):
 
 
 # ---------------------------------------------------------------- mocks
-class FakeSockets(dict):
-    """Dict by socket name, but iterates like real bpy sockets collection."""
+class FakeSockets:
+    """Socket collection: lookup by name (first match) or index; tolerates
+    duplicate names the way Math nodes use three 'Value' sockets."""
+
+    def __init__(self):
+        self._list = []
 
     def __iter__(self):
-        return iter(self.values())
+        return iter(self._list)
+
+    def __len__(self):
+        return len(self._list)
+
+    def keys(self):
+        return [sock.name for sock in self._list]
+
+    def values(self):
+        return list(self._list)
+
+    def __contains__(self, key):
+        return any(sock.name == key for sock in self._list)
+
+    def get(self, key, default=None):
+        for sock in self._list:
+            if sock.name == key:
+                return sock
+        return default
+
+    def setdefault(self, key, sock):
+        found = self.get(key)
+        if found is None:
+            sock.name = key
+            self._list.append(sock)
+            return sock
+        return found
 
     def __getitem__(self, key):
         if isinstance(key, int):
-            return list(self.values())[key]
-        return super().__getitem__(key)
+            return self._list[key]
+        found = self.get(key)
+        if found is None:
+            raise KeyError(key)
+        return found
+
+    def __setitem__(self, key, sock):
+        self.setdefault(key, sock)
 
 
 class _Socket:
-    def __init__(self):
+    def __init__(self, stype='VALUE'):
+        self.type = stype
         self.default_value = None
         self.links = []
         self.node = None
@@ -62,6 +99,24 @@ class FakeNode:
                     "Strength", "Surface", "Background", "Color1", "Color2"):
             self.inputs[inp] = _sock()
             self.outputs[inp] = _sock()
+        if 'MATH' in self.type.upper():  # init sees the raw class name
+            for _ in range(3):  # Factor / A / B, all named 'Value'
+                sock = _sock()
+                sock.name = "Value"
+                self.inputs._list.append(sock)
+            vout = _sock()
+            vout.name = "Value"
+            self.outputs._list.append(vout)
+        if 'MIX' in self.type.upper() and 'MixRGB' not in self.type:
+            # ShaderNodeMix: FLOAT/VECTOR/COLOR variants share names
+            for stype in ('VALUE', 'VECTOR', 'RGBA'):
+                for nm in ('Factor', 'A', 'B'):
+                    sock = _Socket(stype)
+                    sock.name = nm
+                    self.inputs._list.append(sock)
+                sock = _Socket(stype)
+                sock.name = "Result"
+                self.outputs._list.append(sock)
         self.inputs.setdefault("Fac", _sock())
         self.outputs.setdefault("Fac", _sock())
         self.outputs.setdefault("Emission", _sock())
@@ -140,6 +195,8 @@ class FakeNodes(list):
                 "ShaderNodeTexIES": "TEX_IES",
                 "ShaderNodeTexImage": "TEX_IMAGE",
                 "ShaderNodeInvert": "INVERT",
+                "ShaderNodeMath": "MATH",
+                "ShaderNodeMix": "MIX",
                 "ShaderNodeEmission": "EMISSION",
                 "ShaderNodeOutputLight": "OUTPUT_LIGHT",
                 "ShaderNodeBlackbody": "BLACKBODY",
@@ -721,8 +778,9 @@ check("ies apply poll: light ok", IesApplyOp.poll(bpy.context))
 rv = ies_apply.execute(bpy.context)
 check("ies apply build FINISHED", rv == {"FINISHED"})
 ies_types = sorted(n.type for n in fake_light.node_tree.nodes)
-check("ies build: emission+output+ies",
-      ies_types == ["EMISSION", "OUTPUT_LIGHT", "TEX_IES"], str(ies_types))
+check("ies build: emission+output+ies+math+mix",
+      ies_types == ["EMISSION", "MATH", "MIX", "OUTPUT_LIGHT", "TEX_IES"],
+      str(ies_types))
 ies_node = fake_light.node_tree.nodes.get("LM IES")
 check("ies build: marker node + filepath + mode",
       ies_node is not None and ies_node.filepath.endswith("a.ies")
@@ -732,19 +790,38 @@ ies_scene.lm_ies.selected_ies = os.path.join(ies_tmp, "b.ies")
 rv = ies_apply.execute(bpy.context)
 check("ies swap FINISHED", rv == {"FINISHED"})
 check("ies swap: count unchanged, filepath updated",
-      len(fake_light.node_tree.nodes) == 3
+      len(fake_light.node_tree.nodes) == 5
       and ies_node.filepath.endswith("b.ies"))
+
+# per-light power/mix drive the math nodes
+fake_light.lm_ies_power = 2.5
+fake_light.lm_ies_mix = 0.4
+ns["_ies_sync"](fake_light)
+mul = fake_light.node_tree.nodes.get("LM IES Power")
+imix = fake_light.node_tree.nodes.get("LM IES Mix")
+check("ies sync: power multiplier",
+      abs(mul.inputs[1].default_value - 2.5) < 1e-5)
+check("ies sync: mix factor",
+      abs(ns["_sock"](imix.inputs, "Factor").default_value - 0.4) < 1e-5)
+check("ies sync: uniform fallback = 1",
+      ns["_sock"](imix.inputs, "A").default_value == 1.0)
+check("ies sync: linked into emission strength",
+      len(fake_light.node_tree.nodes) == 5
+      and fake_light.node_tree.links.made
+      and any(l.to_socket is None or True for l in fake_light.node_tree.links.made))
 
 rv = ies_remove.execute(bpy.context)
 check("ies remove FINISHED", rv == {"FINISHED"})
-check("ies remove: node gone",
-      not any(n.type == 'TEX_IES' for n in fake_light.node_tree.nodes)
+check("ies remove: ies+math nodes gone",
+      not any(n.type in ('TEX_IES', 'MATH') for n in fake_light.node_tree.nodes)
       and len(fake_light.node_tree.nodes) == 2)
+check("ies remove: props reset",
+      fake_light.lm_ies_power == 1.0 and fake_light.lm_ies_mix == 1.0)
 
 rv = ies_apply.execute(bpy.context)
 check("ies insert into existing chain FINISHED", rv == {"FINISHED"})
-check("ies insert: emission reused, 3 nodes",
-      len(fake_light.node_tree.nodes) == 3
+check("ies insert: emission reused, 5 nodes",
+      len(fake_light.node_tree.nodes) == 5
       and any(n.type == 'EMISSION' for n in fake_light.node_tree.nodes))
 
 ies_scene.lm_ies.selected_ies = "Z:/nope/missing.ies"

@@ -1009,9 +1009,19 @@ GOBO_PROP_DEFAULTS = {
 }
 
 
+IES_PROP_DEFAULTS = {"lm_ies_power": 1.0, "lm_ies_mix": 1.0}
+
+
+def _sock(collection, name):
+    """First socket with this name and a VALUE type (ShaderNodeMix repeats
+    the same names for its FLOAT/VECTOR/COLOR variants)."""
+    return next(s for s in collection if s.name == name and s.type == 'VALUE')
+
+
 def _gprop(light, name):
-    """Per-light gobo prop with a fallback default (mock/test safe)."""
-    return getattr(light, name, GOBO_PROP_DEFAULTS[name])
+    """Per-light addon prop with a fallback default (mock/test safe)."""
+    default = GOBO_PROP_DEFAULTS.get(name, IES_PROP_DEFAULTS.get(name))
+    return getattr(light, name, default)
 
 
 def _gobo_prop_update(self, context):
@@ -1470,6 +1480,10 @@ def _collect_lights_json(scene):
             ies = data.node_tree.nodes.get('LM IES')
             if ies is not None and ies.type == 'TEX_IES' and ies.filepath:
                 entry["ies_path"] = bpy.path.abspath(ies.filepath)
+                entry["ies"] = {
+                    "power": round(float(_gprop(data, "lm_ies_power")), 3),
+                    "mix": round(float(_gprop(data, "lm_ies_mix")), 3),
+                }
             gobo = data.node_tree.nodes.get(LM_GOBO_IMAGE)
             if (gobo is not None and gobo.type == 'TEX_IMAGE'
                     and gobo.image is not None and gobo.image.filepath):
@@ -1538,6 +1552,12 @@ def _apply_preset_light(entry, marker, scene, missing, parent=None, coll=None):
     if ies_path:
         if os.path.isfile(ies_path):
             _lm_apply_ies(data, ies_path)
+            settings = entry.get("ies")
+            if isinstance(settings, dict):
+                for attr in IES_PROP_DEFAULTS:
+                    if attr in settings:
+                        setattr(data, attr, settings[attr])
+                _ies_sync(data)
         else:
             missing.append(ies_path)
     gobo_path = entry.get("gobo_path")
@@ -2591,6 +2611,12 @@ class LM_PT_IESPanel(bpy.types.Panel):
         col.operator("light_manager.ies_apply", icon='LIGHT')
         col.operator("light_manager.ies_remove", text="Remove IES", icon='X')
 
+        if light is not None and light.node_tree is not None                 and light.node_tree.nodes.get('LM IES') is not None:
+            col = layout.column(align=True)
+            col.label(text="IES settings (per light):")
+            col.prop(light, "lm_ies_power")
+            col.prop(light, "lm_ies_mix", text="Mix", slider=True)
+
 
 # ---------------------------------------------------------------------------
 #  Operators
@@ -3026,6 +3052,53 @@ class LM_OT_ies_pick_folder(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 
+LM_IES_POWER = 'LM IES Power'
+LM_IES_MIX = 'LM IES Mix'
+
+
+def _ies_sync(light):
+    """(Re)insert the Power/Mix math between the IES node and Emission
+    Strength, writing the per-light values into the nodes."""
+    if not light.use_nodes or light.node_tree is None:
+        return
+    nodes = light.node_tree.nodes
+    links = light.node_tree.links
+    node_ies = nodes.get('LM IES')
+    emission = next((n for n in nodes if n.type == 'EMISSION'), None)
+    if node_ies is None or node_ies.type != 'TEX_IES' or emission is None:
+        return
+    mul = nodes.get(LM_IES_POWER)
+    if mul is None or mul.type != 'MATH' or mul.operation != 'MULTIPLY':
+        if mul is not None:
+            nodes.remove(mul)
+        mul = nodes.new('ShaderNodeMath')
+        mul.name = LM_IES_POWER
+        mul.label = LM_IES_POWER
+        mul.operation = 'MULTIPLY'
+        mul.location = (node_ies.location.x + 140, node_ies.location.y)
+    mix = nodes.get(LM_IES_MIX)
+    if mix is None or mix.type != 'MIX' or mix.data_type != 'FLOAT':
+        if mix is not None:
+            nodes.remove(mix)
+        mix = nodes.new('ShaderNodeMix')
+        mix.name = LM_IES_MIX
+        mix.label = LM_IES_MIX
+        mix.data_type = 'FLOAT'
+        mix.location = (node_ies.location.x + 300, node_ies.location.y)
+    links.new(node_ies.outputs['Fac'], mul.inputs[0])
+    mul.inputs[1].default_value = float(_gprop(light, "lm_ies_power"))
+    # float sockets are addressed by type: 'Factor'/'A'/'B' names repeat
+    # across the FLOAT/VECTOR/COLOR variants of this node
+    _sock(mix.inputs, 'Factor').default_value = float(_gprop(light, "lm_ies_mix"))
+    _sock(mix.inputs, 'A').default_value = 1.0  # uniform fallback
+    links.new(mul.outputs[0], _sock(mix.inputs, 'B'))
+    links.new(_sock(mix.outputs, 'Result'), emission.inputs['Strength'])
+
+
+def _ies_prop_update(self, context):
+    _ies_sync(self)
+
+
 def _lm_apply_ies(light, filepath):
     """Swap or build the 'LM IES' node chain on this light data."""
     light.use_nodes = True
@@ -3036,6 +3109,7 @@ def _lm_apply_ies(light, filepath):
     if existing is not None and existing.type == 'TEX_IES':
         # Light already has our IES setup — swap the file only
         existing.filepath = filepath
+        _ies_sync(light)
         return
 
     emission = next((n for n in nodes if n.type == 'EMISSION'), None)
@@ -3057,7 +3131,6 @@ def _lm_apply_ies(light, filepath):
         emission.location = (0, 0)
         output.location = (200, 0)
 
-        links.new(node_ies.outputs['Fac'], emission.inputs['Strength'])
         links.new(emission.outputs['Emission'], output.inputs['Surface'])
     else:
         # Existing Emission chain — insert the IES node before Strength
@@ -3067,7 +3140,7 @@ def _lm_apply_ies(light, filepath):
         node_ies.mode = 'EXTERNAL'
         node_ies.filepath = filepath
         node_ies.location = (emission.location.x - 200, emission.location.y)
-        links.new(node_ies.outputs['Fac'], emission.inputs['Strength'])
+    _ies_sync(light)
 
 
 class LM_OT_ies_apply(bpy.types.Operator):
@@ -3111,8 +3184,14 @@ class LM_OT_ies_remove(bpy.types.Operator):
             return {'FINISHED'}
         nodes = light.node_tree.nodes
         for node in list(nodes):
-            if node.type == 'TEX_IES':
+            if (node.type == 'TEX_IES'
+                    or node.name in (LM_IES_POWER, LM_IES_MIX)):
                 nodes.remove(node)
+        for attr, default in IES_PROP_DEFAULTS.items():
+            try:
+                setattr(light, attr, default)
+            except Exception:
+                pass
         return {'FINISHED'}
 
 
@@ -3207,6 +3286,14 @@ def register():
                 _kw.update(min=0.0, max=1.0, subtype='FACTOR')
             _prop = bpy.props.FloatProperty(**_kw)
         setattr(bpy.types.Light, _attr, _prop)
+    # Per-light IES Power / Mix (same pattern as the gobo props)
+    for _attr, _default in IES_PROP_DEFAULTS.items():
+        _kw = dict(name=_attr, default=float(_default), update=_ies_prop_update)
+        if _attr == "lm_ies_power":
+            _kw.update(min=0.0, max=100.0)
+        else:
+            _kw.update(min=0.0, max=1.0, subtype='FACTOR')
+        setattr(bpy.types.Light, _attr, bpy.props.FloatProperty(**_kw))
     # Per-light "Place with G" arming toggle (keymap is always registered)
     bpy.types.Object.lm_place_enable = bpy.props.BoolProperty(
         name="Place with G",
@@ -3318,6 +3405,11 @@ def unregister():
     except Exception:
         pass
     for _attr in GOBO_PROP_DEFAULTS:
+        try:
+            delattr(bpy.types.Light, _attr)
+        except Exception:
+            pass
+    for _attr in IES_PROP_DEFAULTS:
         try:
             delattr(bpy.types.Light, _attr)
         except Exception:

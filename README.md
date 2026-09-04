@@ -84,6 +84,7 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - **Apply IES** — builds the IES node setup on the **active light** (Point or Spot): `IES → Emission → Output`
 - If the light already has the LAMPOCHKA IES setup, only the file is swapped; if it has an Emission chain, the IES node is inserted without destroying nodes
 - **Remove IES** strips the IES node from the active light
+- **Per-light IES settings**: **Power** (brightness multiplier for the profile) and **Mix** (0–100%: how strongly the profile shapes the light vs uniform output); presets save/restore both
 - IES profiles work in **Cycles only** (the panel warns when another engine is active)
 - The last picked folder is remembered in preferences, same as HDRI
 
