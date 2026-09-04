@@ -117,7 +117,10 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - Pick a folder — textures appear as a thumbnail grid, click Apply
 - Works on **any active light**: spots get the classic cone projection, areas get a planar "patterned softbox", points are converted to spots automatically on Apply (suns are refused — no position, no projection)
 - Built on **the active light**: if the light has no node setup, a clean `TexCoord → Mapping → Image → Emission → Output` chain is built; if it already has an Emission chain, the gobo is multiplied in without destroying nodes
-- **Rotation / Scale** sliders drive the projection mapping live
+- **Per-light projection settings** (stored on the light, so every gobo is independent):
+  **Rotation**, **Scale X / Y** (stretch patterns into blinds/stripes), **Offset X / Y**,
+  **Mix** (0–100%: gobo as an accent over the base light output), **Invert** and **Flip X**
+- Presets save and restore the gobo settings together with the texture path
 - **Remove Gobo** strips the gobo nodes and restores the previous color source
 - The last picked folder is remembered in preferences, same as HDRI and IES
 

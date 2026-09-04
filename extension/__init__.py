@@ -948,7 +948,8 @@ _gobo_cache_folder = None
 
 LM_GOBO_TEXCOORD = 'LM Gobo TexCoord'
 LM_GOBO_MAPPING = 'LM Gobo Mapping'
-LM_GOBO_IMAGE = 'LM Gobo'
+LM_GOBO_IMAGE = 'LM Gobo Image'
+LM_GOBO_INVERT = 'LM Gobo Invert'
 LM_GOBO_MIX = 'LM Gobo Mix'
 
 
@@ -988,21 +989,54 @@ def gobo_enum_items(self, context):
     return _gobo_enum_cache
 
 
-def update_gobo_transform(self, context):
-    """Write rotation/scale of the panel into the active light's gobo mapping."""
-    try:
-        obj = getattr(context, "active_object", None)
-        light = get_obj_light(obj) if obj is not None else None
-        if light is None or not light.use_nodes or light.node_tree is None:
-            return
-        node = light.node_tree.nodes.get(LM_GOBO_MAPPING)
-        if node is None or node.type != 'MAPPING':
-            return
-        node.inputs['Rotation'].default_value[2] = math.radians(self.rotation)
-        s = max(0.01, self.scale)
-        node.inputs['Scale'].default_value = (s, s, s)
-    except Exception:
-        pass
+GOBO_PROP_DEFAULTS = {
+    "lm_gobo_rot": 0.0, "lm_gobo_scale_x": 1.0, "lm_gobo_scale_y": 1.0,
+    "lm_gobo_offset_x": 0.0, "lm_gobo_offset_y": 0.0,
+    "lm_gobo_mix": 1.0, "lm_gobo_invert": False, "lm_gobo_flipx": False,
+}
+
+
+def _gprop(light, name):
+    """Per-light gobo prop with a fallback default (mock/test safe)."""
+    return getattr(light, name, GOBO_PROP_DEFAULTS[name])
+
+
+def _gobo_prop_update(self, context):
+    _gobo_sync(self)
+
+
+def _gobo_sync(light):
+    """Write the per-light gobo props into the node chain (if present)."""
+    if not light.use_nodes or light.node_tree is None:
+        return
+    nodes = light.node_tree.nodes
+    links = light.node_tree.links
+    image = nodes.get(LM_GOBO_IMAGE)
+    mix = nodes.get(LM_GOBO_MIX)
+    if image is None or mix is None or image.type != 'TEX_IMAGE':
+        return
+    invert = nodes.get(LM_GOBO_INVERT)
+    if invert is None or invert.type != 'INVERT':
+        invert = nodes.new('ShaderNodeInvert')
+        invert.name = LM_GOBO_INVERT
+        invert.label = LM_GOBO_INVERT
+        invert.location = (image.location.x + 100, image.location.y - 100)
+        links.new(image.outputs['Color'], invert.inputs['Color'])
+        links.new(invert.outputs['Color'], mix.inputs['Color2'])
+    invert.inputs['Fac'].default_value = 1.0 if _gprop(light, "lm_gobo_invert") else 0.0
+    mix.inputs['Fac'].default_value = float(_gprop(light, "lm_gobo_mix"))
+    mapping = nodes.get(LM_GOBO_MAPPING)
+    if mapping is not None and mapping.type == 'MAPPING':
+        sx = float(_gprop(light, "lm_gobo_scale_x"))
+        if _gprop(light, "lm_gobo_flipx"):
+            sx = -sx
+        mapping.inputs['Scale'].default_value = (
+            sx, float(_gprop(light, "lm_gobo_scale_y")), 1.0)
+        mapping.inputs['Location'].default_value = (
+            float(_gprop(light, "lm_gobo_offset_x")),
+            float(_gprop(light, "lm_gobo_offset_y")), 0.0)
+        mapping.inputs['Rotation'].default_value[2] = math.radians(
+            float(_gprop(light, "lm_gobo_rot")))
 
 
 class LM_GoboSettings(PropertyGroup):
@@ -1015,16 +1049,6 @@ class LM_GoboSettings(PropertyGroup):
         name="Gobo",
         items=gobo_enum_items,
         description="Gobo textures found in the folder",
-    )
-    rotation: FloatProperty(
-        name="Rotation", min=0.0, max=360.0, default=0.0,
-        update=update_gobo_transform,
-        description="Rotation of the projected texture (degrees)",
-    )
-    scale: FloatProperty(
-        name="Scale", min=0.05, max=20.0, default=1.0,
-        update=update_gobo_transform,
-        description="Scale of the projected texture",
     )
 
 
@@ -1082,9 +1106,21 @@ def _lm_apply_gobo(obj, filepath):
         emission.location = (0, 0)
         output.location = (200, 0)
 
+        invert = nodes.new('ShaderNodeInvert')
+        invert.name = LM_GOBO_INVERT
+        invert.label = LM_GOBO_INVERT
+        invert.location = (-100, 0)
+        mix = nodes.new('ShaderNodeMixRGB')
+        mix.name = LM_GOBO_MIX
+        mix.label = LM_GOBO_MIX
+        mix.blend_type = 'MULTIPLY'
+        mix.location = (100, 0)
+        mix.inputs['Color1'].default_value = (1.0, 1.0, 1.0, 1.0)
         links.new(texcoord.outputs['Generated'], mapping.inputs['Vector'])
         links.new(mapping.outputs['Vector'], tex_image.inputs['Vector'])
-        links.new(tex_image.outputs['Color'], emission.inputs['Color'])
+        links.new(tex_image.outputs['Color'], invert.inputs['Color'])
+        links.new(invert.outputs['Color'], mix.inputs['Color2'])
+        links.new(mix.outputs['Color'], emission.inputs['Color'])
         links.new(emission.outputs['Emission'], output.inputs['Surface'])
     else:
         # Existing chain — insert (or update) the multiply mix before Emission Color
@@ -1124,11 +1160,21 @@ def _lm_apply_gobo(obj, filepath):
                 src = None
                 mix.inputs['Color1'].default_value = tuple(
                     color_in.default_value[:3]) + (1.0,)
-            links.new(tex_image.outputs['Color'], mix.inputs['Color2'])
             links.new(mix.outputs['Color'], color_in)
             if src is not None:
                 links.new(src, mix.inputs['Color1'])
-            mix.inputs['Fac'].default_value = 1.0
+
+        # image -> invert -> mix: the invert lives in the chain so the
+        # per-light toggle just flips its Fac
+        invert = nodes.get(LM_GOBO_INVERT)
+        if invert is None or invert.type != 'INVERT':
+            invert = nodes.new('ShaderNodeInvert')
+            invert.name = LM_GOBO_INVERT
+            invert.label = LM_GOBO_INVERT
+            invert.location = (tex_image.location.x + 100,
+                               tex_image.location.y - 100)
+        links.new(tex_image.outputs['Color'], invert.inputs['Color'])
+        links.new(invert.outputs['Color'], mix.inputs['Color2'])
     return {'FINISHED'}
 
 
@@ -1137,16 +1183,10 @@ def _gobo_apply_image(context, filepath):
     rv = _lm_apply_gobo(obj, filepath)
     if rv != {'FINISHED'}:
         return rv
-    # scene-wide gobo rotation/scale onto the just-updated mapping
     light = get_obj_light(obj)
-    if light is None or not light.use_nodes or light.node_tree is None:
+    if light is None:
         return rv
-    gobo = context.scene.lm_gobo
-    mapping = light.node_tree.nodes.get(LM_GOBO_MAPPING)
-    if mapping is not None and mapping.type == 'MAPPING':
-        mapping.inputs['Rotation'].default_value[2] = math.radians(gobo.rotation)
-        s = max(0.01, gobo.scale)
-        mapping.inputs['Scale'].default_value = (s, s, s)
+    _gobo_sync(light)
     return rv
 
 
@@ -1177,9 +1217,16 @@ def _gobo_remove(context):
                 emission.inputs['Color'].default_value = tuple(mix_color) + (1.0,)
 
     for node in list(nodes):
-        if node.name in (LM_GOBO_IMAGE, LM_GOBO_MAPPING, LM_GOBO_TEXCOORD):
+        if node.name in (LM_GOBO_IMAGE, LM_GOBO_MAPPING, LM_GOBO_TEXCOORD,
+                         LM_GOBO_INVERT):
             nodes.remove(node)
     _gobo_cleanup_orphans(nodes)
+    if light is not None:
+        for attr, default in GOBO_PROP_DEFAULTS.items():
+            try:
+                setattr(light, attr, default)
+            except Exception:
+                pass
     return {'FINISHED'}
 
 
@@ -1301,6 +1348,21 @@ class LM_PT_GoboPanel(bpy.types.Panel):
         col = layout.column(align=True)
         col.operator("light_manager.gobo_apply", icon='TEXTURE')
         col.operator("light_manager.gobo_remove", text="Remove Gobo", icon='X')
+
+        if light is not None and light.type != 'SUN':
+            col = layout.column(align=True)
+            col.label(text="Projection (per light):")
+            col.prop(light, "lm_gobo_rot")
+            row = col.row(align=True)
+            row.prop(light, "lm_gobo_scale_x", text="Scale X")
+            row.prop(light, "lm_gobo_scale_y", text="Scale Y")
+            row = col.row(align=True)
+            row.prop(light, "lm_gobo_offset_x", text="Offset X")
+            row.prop(light, "lm_gobo_offset_y", text="Offset Y")
+            col.prop(light, "lm_gobo_mix", text="Mix", slider=True)
+            row = col.row(align=True)
+            row.prop(light, "lm_gobo_invert", text="Invert", toggle=True)
+            row.prop(light, "lm_gobo_flipx", text="Flip X", toggle=True)
         col.separator()
         col.prop(gobo, "rotation")
         col.prop(gobo, "scale")
@@ -1399,6 +1461,16 @@ def _collect_lights_json(scene):
             if (gobo is not None and gobo.type == 'TEX_IMAGE'
                     and gobo.image is not None and gobo.image.filepath):
                 entry["gobo_path"] = bpy.path.abspath(gobo.image.filepath)
+                entry["gobo"] = {
+                    "rot": round(float(_gprop(data, "lm_gobo_rot")), 3),
+                    "scale_x": round(float(_gprop(data, "lm_gobo_scale_x")), 4),
+                    "scale_y": round(float(_gprop(data, "lm_gobo_scale_y")), 4),
+                    "offset_x": round(float(_gprop(data, "lm_gobo_offset_x")), 4),
+                    "offset_y": round(float(_gprop(data, "lm_gobo_offset_y")), 4),
+                    "mix": round(float(_gprop(data, "lm_gobo_mix")), 3),
+                    "invert": bool(_gprop(data, "lm_gobo_invert")),
+                    "flipx": bool(_gprop(data, "lm_gobo_flipx")),
+                }
         entries.append(entry)
     return entries, offenders
 
@@ -1457,12 +1529,21 @@ def _apply_preset_light(entry, marker, scene, missing, parent=None, coll=None):
             missing.append(ies_path)
     gobo_path = entry.get("gobo_path")
     if gobo_path:
-        if ltype != 'SPOT':
-            missing.append(gobo_path + " (gobo needs a spot)")
-        elif os.path.isfile(gobo_path):
-            _lm_apply_gobo(obj, gobo_path)
+        if ltype == 'SUN':
+            missing.append(gobo_path + " (gobo: Sun not supported)")
         else:
-            missing.append(gobo_path)
+            if ltype == 'POINT':
+                data.type = 'SPOT'
+            if not os.path.isfile(gobo_path):
+                missing.append(gobo_path)
+            else:
+                _lm_apply_gobo(obj, gobo_path)
+                settings = entry.get("gobo")
+                if isinstance(settings, dict):
+                    for attr in GOBO_PROP_DEFAULTS:
+                        if attr in settings:
+                            setattr(data, attr, settings[attr])
+                    _gobo_sync(data)
     return obj
 
 
@@ -3085,6 +3166,25 @@ def register():
         default=False,
         update=lm_use_temperature_update,
     )
+    # Per-light gobo projection settings (live on the light data, next to
+    # its node tree — presets save/restore them)
+    for _attr, _default in GOBO_PROP_DEFAULTS.items():
+        if _attr in ("lm_gobo_invert", "lm_gobo_flipx"):
+            _prop = bpy.props.BoolProperty(
+                name=_attr, default=bool(_default), update=_gobo_prop_update)
+        else:
+            _kw = dict(name=_attr, default=float(_default),
+                       update=_gobo_prop_update)
+            if _attr == "lm_gobo_rot":
+                _kw.update(min=0.0, max=360.0)
+            elif _attr.startswith("lm_gobo_scale"):
+                _kw.update(min=0.05, max=20.0)
+            elif _attr.startswith("lm_gobo_offset"):
+                _kw.update(min=-2.0, max=2.0)
+            elif _attr == "lm_gobo_mix":
+                _kw.update(min=0.0, max=1.0, subtype='FACTOR')
+            _prop = bpy.props.FloatProperty(**_kw)
+        setattr(bpy.types.Light, _attr, _prop)
     # Per-light "Place with G" arming toggle (keymap is always registered)
     bpy.types.Object.lm_place_enable = bpy.props.BoolProperty(
         name="Place with G",
@@ -3195,6 +3295,11 @@ def unregister():
         del bpy.types.Object.lm_place_enable
     except Exception:
         pass
+    for _attr in GOBO_PROP_DEFAULTS:
+        try:
+            delattr(bpy.types.Light, _attr)
+        except Exception:
+            pass
     for cls in reversed(classes):
         try:
             bpy.utils.unregister_class(cls)

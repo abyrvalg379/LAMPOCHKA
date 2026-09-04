@@ -139,6 +139,7 @@ class FakeNodes(list):
                 "ShaderNodeOutputWorld": "OUTPUT_WORLD",
                 "ShaderNodeTexIES": "TEX_IES",
                 "ShaderNodeTexImage": "TEX_IMAGE",
+                "ShaderNodeInvert": "INVERT",
                 "ShaderNodeEmission": "EMISSION",
                 "ShaderNodeOutputLight": "OUTPUT_LIGHT",
                 "ShaderNodeBlackbody": "BLACKBODY",
@@ -227,6 +228,7 @@ bpy.types.Panel = type("Panel", (), {})
 bpy.types.Operator = type("Operator", (), {})
 bpy.types.Scene = type("Scene", (), {})
 bpy.types.Object = type("Object", (), {})
+bpy.types.Light = type("Light", (), {})
 bpy.types.AddonPreferences = type("AddonPreferences", (), {})
 
 bpy.props = types.ModuleType("bpy.props")
@@ -1061,8 +1063,7 @@ check("lm_gobo pointer added", ns["LM_GoboSettings"] in _pointers)
 check("prefs has gobo folder",
       "gobo_folder" in ns["LM_AddonPreferences"].__annotations__)
 
-_scene.lm_gobo = types.SimpleNamespace(gobo_folder="", selected_gobo="",
-                                       rotation=30.0, scale=2.0)
+_scene.lm_gobo = types.SimpleNamespace(gobo_folder="", selected_gobo="")
 
 gobo_obj = FakeObj('LIGHT', FakeLightData(), name="SpotGobo")
 gobo_light = gobo_obj.data
@@ -1075,22 +1076,25 @@ check("gobo apply returns FINISHED", rv == {'FINISHED'})
 check("gobo build: light uses nodes", gobo_light.use_nodes is True)
 tc = gnodes.get("LM Gobo TexCoord")
 mp = gnodes.get("LM Gobo Mapping")
-ti = gnodes.get("LM Gobo")
+ti = gnodes.get("LM Gobo Image")
+inv = gnodes.get("LM Gobo Invert")
 em = next((n for n in gnodes if n.type == 'EMISSION'), None)
 out = next((n for n in gnodes if n.type == 'OUTPUT_LIGHT'), None)
 check("gobo build: all nodes created",
       tc is not None and mp is not None and ti is not None
-      and em is not None and out is not None)
+      and inv is not None and em is not None and out is not None)
 check("gobo build: image assigned to node",
       ti is not None and ti.image is not None)
-check("gobo build: texcoord -> mapping -> image -> emission color -> output",
+check("gobo build: texcoord -> mapping -> image -> invert -> emission -> output",
       tc.outputs["Generated"].links and tc.outputs["Generated"].links[0].to_socket is mp.inputs["Vector"]
       and mp.outputs["Vector"].links[0].to_socket is ti.inputs["Vector"]
-      and ti.outputs["Color"].links[0].to_socket is em.inputs["Color"]
+      and ti.outputs["Color"].links[0].to_socket is inv.inputs["Color"]
+      and inv.outputs["Color"].links[0].to_socket is gnodes.get("LM Gobo Mix").inputs["Color2"]
+      and gnodes.get("LM Gobo Mix").outputs["Color"].links[0].to_socket is em.inputs["Color"]
       and em.outputs["Emission"].links[0].to_socket is out.inputs["Surface"])
-check("gobo build: mapping rotation/scale from props",
-      abs(mp.inputs["Rotation"].default_value[2] - 0.5236) < 0.001
-      and mp.inputs["Scale"].default_value == (2.0, 2.0, 2.0))
+check("gobo build: defaults written to mapping",
+      mp.inputs["Rotation"].default_value[2] == 0.0
+      and mp.inputs["Scale"].default_value == (1.0, 1.0, 1.0))
 
 # --- insert branch (existing chain, color from blackbody)
 ins_obj = FakeObj('LIGHT', FakeLightData(), name="SpotIns")
@@ -1113,27 +1117,30 @@ check("gobo insert: emission color fed by mix",
 check("gobo insert: color1 keeps old source (blackbody)",
       mix.inputs["Color1"].is_linked
       and mix.inputs["Color1"].links[0].from_socket is bb.outputs["Fac"])
-check("gobo insert: color2 from gobo image",
+check("gobo insert: color2 from invert",
       mix.inputs["Color2"].is_linked
-      and mix.inputs["Color2"].links[0].from_socket is tn.get("LM Gobo").outputs["Color"])
+      and mix.inputs["Color2"].links[0].from_socket is tn.get("LM Gobo Invert").outputs["Color"])
 check("gobo insert: existing image node gets image",
-      tn.get("LM Gobo").image is not None)
-check("gobo insert: fac = 1", mix.inputs["Fac"].default_value == 1.0)
+      tn.get("LM Gobo Image").image is not None)
+check("gobo insert: fac defaults to full mix",
+      mix.inputs["Fac"].default_value == 1.0)
 
 # --- remove restores the previous chain
 ns["_gobo_remove"](ins_ctx)
 check("gobo remove: mix gone", tn.get("LM Gobo Mix") is None)
 check("gobo remove: markers gone",
-      tn.get("LM Gobo") is None and tn.get("LM Gobo Mapping") is None
-      and tn.get("LM Gobo TexCoord") is None)
+      tn.get("LM Gobo Image") is None and tn.get("LM Gobo Mapping") is None
+      and tn.get("LM Gobo TexCoord") is None
+      and tn.get("LM Gobo Invert") is None)
 check("gobo remove: emission color restored from blackbody",
       em_color_in.is_linked and em_color_in.links[0].from_socket is bb.outputs["Fac"])
 
 # --- remove on a built-from-scratch chain clears it
 rv = ns["_gobo_remove"](gobo_ctx)
 check("gobo remove: built chain cleared",
-      gnodes.get("LM Gobo") is None and gnodes.get("LM Gobo Mapping") is None
-      and gnodes.get("LM Gobo TexCoord") is None)
+      gnodes.get("LM Gobo Image") is None and gnodes.get("LM Gobo Mapping") is None
+      and gnodes.get("LM Gobo TexCoord") is None
+      and gnodes.get("LM Gobo Invert") is None)
 
 # --- unlinked color: color1 gets the old value baked in
 un_obj = FakeObj('LIGHT', FakeLightData(), name="SpotUn")
@@ -1150,20 +1157,37 @@ c1 = [round(c, 4) for c in umix.inputs["Color1"].default_value[:3]]
 check("gobo insert (unlinked color): color1 baked",
       c1 == [0.5, 0.25, 0.1], str(c1))
 
-# --- transform update writes into mapping of active light
-_scene.lm_gobo.rotation = 90.0
-_scene.lm_gobo.scale = 0.5
-ns["update_gobo_transform"](_scene.lm_gobo, gobo_ctx)
-# gobo chain was removed above -> rebuild minimal mapping to test update
+# --- per-light props drive the node chain (v3.2)
 ns["_gobo_apply_image"](gobo_ctx, "g_test.png")
 mp2 = gnodes.get("LM Gobo Mapping")
-_scene.lm_gobo.rotation = 45.0
-_scene.lm_gobo.scale = 3.0
-ns["update_gobo_transform"](_scene.lm_gobo, gobo_ctx)
-check("gobo transform update: rotation",
+gobo_light.lm_gobo_rot = 45.0
+gobo_light.lm_gobo_scale_x = 3.0
+gobo_light.lm_gobo_scale_y = 0.5
+gobo_light.lm_gobo_offset_x = 0.25
+gobo_light.lm_gobo_mix = 0.5
+gobo_light.lm_gobo_invert = True
+gobo_light.lm_gobo_flipx = True
+ns["_gobo_sync"](gobo_light)
+check("gobo sync: rotation from prop",
       abs(mp2.inputs["Rotation"].default_value[2] - 0.7854) < 0.001)
-check("gobo transform update: scale",
-      mp2.inputs["Scale"].default_value == (3.0, 3.0, 3.0))
+check("gobo sync: scale x mirrored by flip",
+      mp2.inputs["Scale"].default_value == (-3.0, 0.5, 1.0))
+check("gobo sync: offset applied",
+      mp2.inputs["Location"].default_value == (0.25, 0.0, 0.0))
+check("gobo sync: mix fac", mp3_check := gnodes.get("LM Gobo Mix"),
+      "missing mix")
+check("gobo sync: mix fac value",
+      gnodes.get("LM Gobo Mix").inputs["Fac"].default_value == 0.5)
+check("gobo sync: invert fac on",
+      gnodes.get("LM Gobo Invert").inputs["Fac"].default_value == 1.0)
+gobo_light.lm_gobo_invert = False
+ns["_gobo_sync"](gobo_light)
+check("gobo sync: invert fac off",
+      gnodes.get("LM Gobo Invert").inputs["Fac"].default_value == 0.0)
+ns["_gobo_remove"](gobo_ctx)
+check("gobo remove: props reset to defaults",
+      gobo_light.lm_gobo_rot == 0.0 and gobo_light.lm_gobo_mix == 1.0
+      and gobo_light.lm_gobo_flipx is False)
 
 # ================================================================ v3: linking
 bpy.data.objects = types.SimpleNamespace(
