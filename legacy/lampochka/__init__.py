@@ -1308,6 +1308,21 @@ class LM_PT_GoboPanel(bpy.types.Panel):
 # ---------------------------------------------------------------------------
 
 LM_PRESET_PROP = 'lm_preset'
+PRESET_COLLECTION_NAME = "Presets"
+
+
+def _preset_collection(context):
+    """Get-or-create the dedicated collection that holds ALL preset lights.
+    Applying a preset wipes this collection first, so presets never mix
+    with each other or with the user's own lights."""
+    coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+    if coll is None:
+        coll = bpy.data.collections.new(PRESET_COLLECTION_NAME)
+    try:
+        context.scene.collection.children.link(coll)
+    except RuntimeError:
+        pass  # already linked to this scene
+    return coll
 PRESET_EXTENSIONS = ('.json',)
 _presets_pcoll = None
 _presets_enum_cache = []
@@ -1385,7 +1400,7 @@ def _collect_lights_json(scene):
     return entries, offenders
 
 
-def _apply_preset_light(entry, marker, scene, missing, parent=None):
+def _apply_preset_light(entry, marker, scene, missing, parent=None, coll=None):
     """Create one light from a preset entry; registers missing files."""
     name = str(entry.get("name", "Light"))
     ltype = entry.get("type")
@@ -1417,8 +1432,8 @@ def _apply_preset_light(entry, marker, scene, missing, parent=None):
         data.angle = math.radians(float(entry.get("angle", 0.526)))
 
     obj = bpy.data.objects.new(name=name, object_data=data)
-    scene.collection.objects.link(obj)
-    obj[LM_PRESET_PROP] = marker
+    (coll if coll is not None else scene.collection).objects.link(obj)
+    obj[LM_PRESET_PROP] = 1
     if parent is not None:
         obj.parent = parent
     obj.location = list(entry.get("location", (0.0, 0.0, 0.0)))
@@ -1579,7 +1594,7 @@ class LM_OT_preset_save(bpy.types.Operator):
 
 
 class LM_OT_clear_lights(bpy.types.Operator):
-    """Remove lights created by LAMPOCHKA presets (lm_preset marker)."""
+    """Remove the Presets collection with everything it holds."""
     bl_idname = "light_manager.clear_lights"
     bl_label = "Clear Lights"
     bl_description = "Remove all lights that came from a LAMPOCHKA preset"
@@ -1587,20 +1602,26 @@ class LM_OT_clear_lights(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return any((ob.type == 'LIGHT' or ob.type == 'EMPTY')
-                   and ob.get(LM_PRESET_PROP, 0) == 1
-                   for ob in context.scene.objects)
+        coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+        return coll is not None and len(coll.objects) > 0
 
     def execute(self, context):
-        doomed = [ob for ob in context.scene.objects
-                  if (ob.type == 'LIGHT' or ob.type == 'EMPTY')
-                  and ob.get(LM_PRESET_PROP, 0) == 1]
-        if not doomed:
+        coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+        if coll is None or not len(coll.objects):
             self.report({'WARNING'}, "No lights from a LAMPOCHKA preset")
             return {'CANCELLED'}
+        doomed = list(coll.objects)
         for ob in doomed:
             bpy.data.objects.remove(ob, do_unlink=True)
-        self.report({'INFO'}, f"Removed {len(doomed)} preset light(s)")
+        # collections don't know their users — walk scenes and collections
+        for sc in bpy.data.scenes:
+            if coll.name in sc.collection.children:
+                sc.collection.children.unlink(coll)
+        for other in bpy.data.collections:
+            if coll.name in other.children:
+                other.children.unlink(coll)
+        bpy.data.collections.remove(coll)
+        self.report({'INFO'}, f"Removed {len(doomed)} preset object(s)")
         return {'FINISHED'}
 
 
@@ -1636,21 +1657,21 @@ class LM_OT_preset_apply(bpy.types.Operator):
             return {'CANCELLED'}
         marker = os.path.splitext(os.path.basename(filepath))[0]
 
-        doomed = [ob for ob in context.scene.objects
-                  if ob.type == 'LIGHT' and ob.get(LM_PRESET_PROP, 0) == 1]
-        empties = [ob for ob in context.scene.objects
-                   if ob.type == 'EMPTY' and ob.get(LM_PRESET_PROP, 0) == 1]
-        for ob in doomed + empties:
+        # the Presets collection is wiped on every apply — one preset at
+        # a time, user's own lights are never touched
+        coll = _preset_collection(context)
+        for ob in list(coll.objects):
             bpy.data.objects.remove(ob, do_unlink=True)
 
         empty = bpy.data.objects.new(name=marker, object_data=None)
         empty.empty_display_type = 'PLAIN_AXES'
         empty[LM_PRESET_PROP] = 1
-        context.scene.collection.objects.link(empty)
+        coll.objects.link(empty)
 
         missing = []
         for entry in entries:
-            _apply_preset_light(entry, marker, context.scene, missing, parent=empty)
+            _apply_preset_light(entry, marker, context.scene, missing,
+                                parent=empty, coll=coll)
         if missing:
             self.report({'WARNING'},
                         f"Applied {len(entries)} lights; missing files: "

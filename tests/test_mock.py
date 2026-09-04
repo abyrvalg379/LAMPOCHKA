@@ -366,9 +366,23 @@ class FakeColl:
     def __init__(self, name):
         self.name = name
         self.objects = FakeObjCollection()
+        self.users_collection = []  # scenes/collections linking this coll
+        self.children = FakeObjCollection()
 
 
-bpy.data.collections = types.SimpleNamespace(new=lambda n: FakeColl(n))
+_coll_db = {}
+
+class FakeCollStore(types.SimpleNamespace):
+    def __iter__(self):
+        return iter(list(_coll_db.values()))
+
+
+_coll_store = FakeCollStore(
+    new=lambda n: _coll_db.setdefault(n, FakeColl(n)),
+    get=lambda n: _coll_db.get(n),
+    remove=lambda c: _coll_db.pop(c.name, None),
+)
+bpy.data.collections = _coll_store
 bpy.data.objects = types.SimpleNamespace(
     get=lambda name: _objects_db.get(name))
 for _n in ("Wall", "Floor", "Actor"):
@@ -1243,25 +1257,44 @@ removed_cl = []
 bpy.data.objects = types.SimpleNamespace(
     remove=lambda o, do_unlink=False: removed_cl.append(o))
 
+# Presets collection holding preset objects only
+_coll_db.clear()
+cl_coll = _coll_store.new("Presets")
 cl_obj1 = FakeObj('LIGHT', name="preset_A")
 cl_obj1["lm_preset"] = 1
 cl_obj2 = FakeObj('LIGHT', name="manual_B")
 cl_obj3 = FakeObj('LIGHT', name="preset_C")
 cl_obj3["lm_preset"] = 1
-cl_obj4 = FakeObj('LIGHT', name="manual_D")
 cl_empty = FakeObj('EMPTY', name="preset_group")
 cl_empty["lm_preset"] = 1
-cl_scene = types.SimpleNamespace(objects=[cl_obj1, cl_obj2, cl_obj3, cl_obj4, cl_empty])
+cl_coll.objects.link(cl_obj1)
+cl_coll.objects.link(cl_obj3)
+cl_coll.objects.link(cl_empty)
+class FakeChildren(FakeObjCollection):
+    def __contains__(self, name):
+        return name in self._items
+
+
+bpy.data.scenes = []
+
+cl_scene = types.SimpleNamespace(objects=[cl_obj1, cl_obj2, cl_obj3, cl_empty])
+cl_scene.collection = types.SimpleNamespace(children=FakeChildren())
+cl_scene.collection.children.link(cl_coll)
+bpy.data.scenes = [cl_scene]
 bpy.context = types.SimpleNamespace(scene=cl_scene)
 
 ClearLightsOp = ns["LM_OT_clear_lights"]
 
-check("clear_lights poll: True when preset lights exist",
+check("clear_lights poll: True when Presets collection has objects",
       ClearLightsOp.poll(bpy.context) is True)
-cl_scene.objects = [cl_obj2, cl_obj4]
-check("clear_lights poll: False when no preset lights",
+cl_coll.objects.unlink(cl_obj1)
+cl_coll.objects.unlink(cl_obj3)
+cl_coll.objects.unlink(cl_empty)
+check("clear_lights poll: False when Presets collection empty",
       ClearLightsOp.poll(bpy.context) is False)
-cl_scene.objects = [cl_obj1, cl_obj2, cl_obj3, cl_obj4, cl_empty]
+cl_coll.objects.link(cl_obj1)
+cl_coll.objects.link(cl_obj3)
+cl_coll.objects.link(cl_empty)
 removed_cl.clear()
 clop = ClearLightsOp()
 clop.report = lambda t, m: None
@@ -1270,12 +1303,14 @@ check("clear_lights: FINISHED", rv == {'FINISHED'})
 check("clear_lights: removed 2 lights + 1 empty",
       len(removed_cl) == 3
       and {o.name for o in removed_cl} == {"preset_A", "preset_C", "preset_group"})
-check("clear_lights: manual lights untouched",
-      cl_obj2 in cl_scene.objects and cl_obj4 in cl_scene.objects)
-cl_scene.objects = [cl_obj2, cl_obj4]
+check("clear_lights: collection removed", _coll_db.get("Presets") is None)
+check("clear_lights: unlinked from scene",
+      cl_scene.collection.children.get("Presets") is None)
+check("clear_lights: manual light untouched",
+      cl_obj2.name == "manual_B" and cl_obj2 not in removed_cl)
 removed_cl.clear()
 rv = clop.execute(bpy.context)
-check("clear_lights: CANCELLED when no preset lights left",
+check("clear_lights: CANCELLED when collection gone",
       rv == {'CANCELLED'} and len(removed_cl) == 0)
 bpy.data.objects = None
 
