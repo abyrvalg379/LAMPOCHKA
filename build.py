@@ -24,7 +24,12 @@ LIB_SOURCES = {
     "presets": WORK.parent / "presets" / "PLS",
     "gobos": WORK.parent / "presets" / "gobos",
     "ies": WORK.parent / "presets" / "ies",
+    "hdri": Path("E:/3D/HDRI"),
 }
+# folders never bundled (user keeps them out of the browser)
+LIB_EXCLUDE_DIRS = {"SP_big"}
+# already-compressed formats — storing is much faster than deflating
+STORED_EXT = {".exr", ".hdr", ".jpg", ".jpeg", ".png"}
 TEAM_NOTE = """LAMPOCHKA TEAM BUILD — внутренняя сборка для команды VVERH.
 
 Содержит библиотеки пресетов, собранные из коммерческих продуктов
@@ -102,8 +107,14 @@ def _add_library(z, arc_prefix):
                 continue
             if path.suffix.lower() == ".blend":
                 continue  # heavy sources stay local
-            arc = f"{arc_prefix}/{sub}/{path.relative_to(src_dir).as_posix()}"
-            z.write(path, arc)
+            rel = path.relative_to(src_dir)
+            if any(part in LIB_EXCLUDE_DIRS for part in rel.parts):
+                continue
+            arc = f"{arc_prefix}/{sub}/{rel.as_posix()}"
+            if path.suffix.lower() in STORED_EXT:
+                z.write(path, arc, compress_type=zipfile.ZIP_STORED)
+            else:
+                z.write(path, arc)
             count += 1
     return count
 

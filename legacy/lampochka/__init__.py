@@ -103,8 +103,14 @@ _hdri_km = None           # addon keymap for Shift+RMB rotation
 _hdri_kmi = None
 
 
+HDRI_PREVIEW_LIMIT = 30 * 1024 * 1024  # skip previews for huge files
+
+
 def hdri_enum_items(self, context):
-    """Dynamic enum items (with thumbnails) for HDRI files in the folder."""
+    """Dynamic enum items (with thumbnails) for HDRI files in the folder.
+    Scanned recursively — library subfolders are part of the collection.
+    Files over HDRI_PREVIEW_LIMIT get a plain icon: generating previews
+    for multi-hundred-MB exr files freezes the UI."""
     global _hdri_cache_folder
     folder = self.hdri_folder
 
@@ -120,21 +126,25 @@ def hdri_enum_items(self, context):
     if not folder or not os.path.isdir(folder) or _hdri_pcoll is None:
         return _hdri_enum_cache
 
-    try:
-        files = sorted(f for f in os.listdir(folder)
-                       if f.lower().endswith(HDRI_EXTENSIONS))
-    except OSError:
-        return _hdri_enum_cache
+    files = []
+    for root, dirs, names in os.walk(folder):
+        dirs.sort()
+        for filename in sorted(names):
+            if filename.lower().endswith(HDRI_EXTENSIONS):
+                files.append(os.path.join(root, filename))
 
-    for filename in files:
-        filepath = os.path.join(folder, filename)
-        name = os.path.splitext(filename)[0]
+    for filepath in files:
+        rel = os.path.relpath(filepath, folder)
+        name = os.path.splitext(rel)[0]
         try:
-            thumb = _hdri_pcoll.load(filepath, filepath, 'IMAGE')
+            if os.path.getsize(filepath) <= HDRI_PREVIEW_LIMIT:
+                icon = _hdri_pcoll.load(filepath, filepath, 'IMAGE').icon_id
+            else:
+                icon = 0  # too big for a live preview
+            _hdri_enum_cache.append(
+                (filepath, name, filepath, icon, len(_hdri_enum_cache)))
         except Exception:
             continue
-        _hdri_enum_cache.append(
-            (filepath, name, filepath, thumb.icon_id, len(_hdri_enum_cache)))
 
     return _hdri_enum_cache
 
@@ -423,7 +433,7 @@ def _seed_scene_folder(scene_group, folder_attr, bundled_sub=None):
 
 
 def _on_pref_hdri(self, context):
-    _seed_scene_folder("lm_hdri", "hdri_folder")
+    _seed_scene_folder("lm_hdri", "hdri_folder", "hdri")
 
 
 def _on_pref_ies(self, context):
@@ -497,7 +507,8 @@ def load_post_handler(dummy):
             if prefs is not None and prefs.presets_folder:
                 scene.lm_presets.preset_folder = prefs.presets_folder
         # team builds ship libraries inside the package — last in the chain
-        for _group, _attr, _sub in (("lm_ies", "ies_folder", "ies"),
+        for _group, _attr, _sub in (("lm_hdri", "hdri_folder", "hdri"),
+                                    ("lm_ies", "ies_folder", "ies"),
                                     ("lm_gobo", "gobo_folder", "gobos"),
                                     ("lm_presets", "preset_folder", "presets")):
             _props = getattr(scene, _group, None)
@@ -2550,7 +2561,7 @@ class LM_PT_HDRIPanel(bpy.types.Panel):
             item = cache[(active + offset) % total]
             filepath, name, _desc, icon = item[0], item[1], item[2], item[3]
             col = row.column(align=True)
-            if isinstance(icon, int):
+            if isinstance(icon, int) and icon:
                 try:
                     col.template_icon(icon_value=icon, scale=4.5)
                 except Exception:
