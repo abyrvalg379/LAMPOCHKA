@@ -386,20 +386,25 @@ def get_lm_prefs(context):
         return None
 
 
-def _seed_scene_folder(scene_group, folder_attr):
-    """Live pickup: changing a default folder in preferences immediately
-    fills the still-empty folder of the current scene. Scenes that keep
-    their own folder are never overridden."""
+def _seed_scene_folder(scene_group, folder_attr, bundled_sub=None):
+    """Folder pickup for the current scene: a saved scene folder always
+    wins; empty ones get the preferences default, then the library
+    bundled with this build (team edition)."""
     try:
         scene = getattr(bpy.context, "scene", None)
         if scene is None:
             return
         scene_props = getattr(scene, scene_group, None)
-        prefs = get_lm_prefs(bpy.context)
-        if scene_props is None or prefs is None:
+        if scene_props is None:
             return
-        if not getattr(scene_props, folder_attr, "") and getattr(prefs, folder_attr, ""):
-            setattr(scene_props, folder_attr, getattr(prefs, folder_attr))
+        if getattr(scene_props, folder_attr, ""):
+            return
+        prefs = get_lm_prefs(bpy.context)
+        value = getattr(prefs, folder_attr, "") if prefs is not None else ""
+        if not value and bundled_sub:
+            value = _bundled_dir(bundled_sub)
+        if value:
+            setattr(scene_props, folder_attr, value)
     except Exception:
         pass
 
@@ -409,15 +414,15 @@ def _on_pref_hdri(self, context):
 
 
 def _on_pref_ies(self, context):
-    _seed_scene_folder("lm_ies", "ies_folder")
+    _seed_scene_folder("lm_ies", "ies_folder", "ies")
 
 
 def _on_pref_gobo(self, context):
-    _seed_scene_folder("lm_gobo", "gobo_folder")
+    _seed_scene_folder("lm_gobo", "gobo_folder", "gobos")
 
 
 def _on_pref_presets(self, context):
-    _seed_scene_folder("lm_presets", "preset_folder")
+    _seed_scene_folder("lm_presets", "preset_folder", "presets")
 
 
 class LM_AddonPreferences(AddonPreferences):
@@ -466,20 +471,27 @@ def load_post_handler(dummy):
         if scene is None or not hasattr(scene, "lm_hdri"):
             return
         prefs = get_lm_prefs(context)
-        if prefs is None:
-            return
         if hasattr(scene, "lm_hdri") and not scene.lm_hdri.hdri_folder:
-            if prefs.hdri_folder:
+            if prefs is not None and prefs.hdri_folder:
                 scene.lm_hdri.hdri_folder = prefs.hdri_folder
         if hasattr(scene, "lm_ies") and not scene.lm_ies.ies_folder:
-            if prefs.ies_folder:
+            if prefs is not None and prefs.ies_folder:
                 scene.lm_ies.ies_folder = prefs.ies_folder
         if hasattr(scene, "lm_gobo") and not scene.lm_gobo.gobo_folder:
-            if prefs.gobo_folder:
+            if prefs is not None and prefs.gobo_folder:
                 scene.lm_gobo.gobo_folder = prefs.gobo_folder
         if hasattr(scene, "lm_presets") and not scene.lm_presets.preset_folder:
-            if prefs.presets_folder:
+            if prefs is not None and prefs.presets_folder:
                 scene.lm_presets.preset_folder = prefs.presets_folder
+        # team builds ship libraries inside the package — last in the chain
+        for _group, _attr, _sub in (("lm_ies", "ies_folder", "ies"),
+                                    ("lm_gobo", "gobo_folder", "gobos"),
+                                    ("lm_presets", "preset_folder", "presets")):
+            _props = getattr(scene, _group, None)
+            if _props is not None and not getattr(_props, _attr, ""):
+                _bundled = _bundled_dir(_sub)
+                if _bundled:
+                    setattr(_props, _attr, _bundled)
         # Rotate toggle is always off in a fresh session — otherwise users
         # forget Shift+RMB is hijacked and blame the default navigation
         if hasattr(scene, "lm_hdri"):
@@ -997,6 +1009,15 @@ GOBO_PROP_DEFAULTS = {
 
 
 IES_PROP_DEFAULTS = {"lm_ies_power": 1.0, "lm_ies_mix": 1.0}
+
+
+def _bundled_dir(subfolder):
+    """Library folder shipped inside this build (team edition packages a
+    libraries/ dir next to the code; the public build has none)."""
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "libraries")
+    path = os.path.join(base, subfolder)
+    return path if os.path.isdir(path) else ""
 
 
 def _sock(collection, name):
