@@ -396,43 +396,62 @@ def get_lm_prefs(context):
         return None
 
 
-def _seed_scene_folder(scene_group, folder_attr, bundled_sub=None):
-    """Folder pickup for the current scene: a saved scene folder always
-    wins; empty ones get the preferences default, then the library
-    bundled with this build (team edition)."""
+_FOLDER_CHAIN = (
+    # (scene group, scene attr, prefs attr, bundled subfolder)
+    ("lm_hdri", "hdri_folder", "hdri_folder", "hdri"),
+    ("lm_ies", "ies_folder", "ies_folder", "ies"),
+    ("lm_gobo", "gobo_folder", "gobo_folder", "gobos"),
+    ("lm_presets", "preset_folder", "presets_folder", "presets"),
+)
+
+
+def _folder_label(folder):
+    """Tail of a path for panel warnings — the picker field above already
+    shows the full path."""
+    name = os.path.basename(os.path.normpath(folder))
+    return name or folder
+
+
+def _resolve_scene_folders():
+    """Scene library folders: a live saved folder always wins; an empty or
+    dead one (library moved / deleted) falls back to preferences, then to
+    the library bundled with team builds. A dead path is kept when nothing
+    live is available — the panel then says 'Folder not found'."""
     try:
         scene = getattr(bpy.context, "scene", None)
         if scene is None:
             return
-        scene_props = getattr(scene, scene_group, None)
-        if scene_props is None:
-            return
-        if getattr(scene_props, folder_attr, ""):
-            return
         prefs = get_lm_prefs(bpy.context)
-        value = getattr(prefs, folder_attr, "") if prefs is not None else ""
-        if not value and bundled_sub:
-            value = _bundled_dir(bundled_sub)
-        if value:
-            setattr(scene_props, folder_attr, value)
+        for group, scene_attr, prefs_attr, sub in _FOLDER_CHAIN:
+            props = getattr(scene, group, None)
+            if props is None:
+                continue
+            current = getattr(props, scene_attr, "")
+            if current and os.path.isdir(current):
+                continue
+            pref_value = getattr(prefs, prefs_attr, "") if prefs is not None else ""
+            for candidate in (pref_value, _bundled_dir(sub)):
+                if candidate and os.path.isdir(candidate):
+                    setattr(props, scene_attr, candidate)
+                    break
     except Exception:
         pass
 
 
 def _on_pref_hdri(self, context):
-    _seed_scene_folder("lm_hdri", "hdri_folder", "hdri")
+    _resolve_scene_folders()
 
 
 def _on_pref_ies(self, context):
-    _seed_scene_folder("lm_ies", "ies_folder", "ies")
+    _resolve_scene_folders()
 
 
 def _on_pref_gobo(self, context):
-    _seed_scene_folder("lm_gobo", "gobo_folder", "gobos")
+    _resolve_scene_folders()
 
 
 def _on_pref_presets(self, context):
-    _seed_scene_folder("lm_presets", "preset_folder", "presets")
+    _resolve_scene_folders()
 
 
 class LM_AddonPreferences(AddonPreferences):
@@ -474,35 +493,14 @@ class LM_AddonPreferences(AddonPreferences):
 
 @persistent
 def load_post_handler(dummy):
-    """Seed empty scene HDRI/IES folders from preferences."""
+    """Seed empty scene library folders from preferences and repair saved
+    folders that no longer exist on disk."""
     try:
         context = bpy.context
         scene = getattr(context, "scene", None)
         if scene is None or not hasattr(scene, "lm_hdri"):
             return
-        prefs = get_lm_prefs(context)
-        if hasattr(scene, "lm_hdri") and not scene.lm_hdri.hdri_folder:
-            if prefs is not None and prefs.hdri_folder:
-                scene.lm_hdri.hdri_folder = prefs.hdri_folder
-        if hasattr(scene, "lm_ies") and not scene.lm_ies.ies_folder:
-            if prefs is not None and prefs.ies_folder:
-                scene.lm_ies.ies_folder = prefs.ies_folder
-        if hasattr(scene, "lm_gobo") and not scene.lm_gobo.gobo_folder:
-            if prefs is not None and prefs.gobo_folder:
-                scene.lm_gobo.gobo_folder = prefs.gobo_folder
-        if hasattr(scene, "lm_presets") and not scene.lm_presets.preset_folder:
-            if prefs is not None and prefs.presets_folder:
-                scene.lm_presets.preset_folder = prefs.presets_folder
-        # team builds ship libraries inside the package — last in the chain
-        for _group, _attr, _sub in (("lm_hdri", "hdri_folder", "hdri"),
-                                    ("lm_ies", "ies_folder", "ies"),
-                                    ("lm_gobo", "gobo_folder", "gobos"),
-                                    ("lm_presets", "preset_folder", "presets")):
-            _props = getattr(scene, _group, None)
-            if _props is not None and not getattr(_props, _attr, ""):
-                _bundled = _bundled_dir(_sub)
-                if _bundled:
-                    setattr(_props, _attr, _bundled)
+        _resolve_scene_folders()
         # Rotate toggle is always off in a fresh session — otherwise users
         # forget Shift+RMB is hijacked and blame the default navigation
         if hasattr(scene, "lm_hdri"):
@@ -1357,8 +1355,12 @@ class LM_PT_GoboPanel(bpy.types.Panel):
         row.prop(gobo, "gobo_folder", text="")
         row.operator("light_manager.gobo_pick_folder", text="", icon='FILE_FOLDER')
 
-        if not gobo.gobo_folder or not os.path.isdir(gobo.gobo_folder):
+        if not gobo.gobo_folder:
             layout.label(text="Pick a folder with gobo textures", icon='INFO')
+            return
+        if not os.path.isdir(gobo.gobo_folder):
+            layout.label(text="Folder not found: %s"
+                         % _folder_label(gobo.gobo_folder), icon='ERROR')
             return
 
         # Trigger enum rebuild if needed, then check what we have
@@ -1835,9 +1837,13 @@ class LM_PT_PresetsPanel(bpy.types.Panel):
         row.operator("light_manager.preset_pick_folder", text="",
                      icon='FILE_FOLDER')
 
-        if not presets.preset_folder or not os.path.isdir(presets.preset_folder):
+        if not presets.preset_folder:
             layout.label(text="Pick a folder with preset .json files",
                          icon='INFO')
+            return
+        if not os.path.isdir(presets.preset_folder):
+            layout.label(text="Folder not found: %s"
+                         % _folder_label(presets.preset_folder), icon='ERROR')
             return
 
         _ = presets.selected_preset
@@ -2524,8 +2530,12 @@ class LM_PT_HDRIPanel(bpy.types.Panel):
         row.prop(hdri, "hdri_folder", text="")
         row.operator("light_manager.hdri_pick_folder", text="", icon='FILE_FOLDER')
 
-        if not hdri.hdri_folder or not os.path.isdir(hdri.hdri_folder):
+        if not hdri.hdri_folder:
             layout.label(text="Pick a folder with .exr / .hdr", icon='INFO')
+            return
+        if not os.path.isdir(hdri.hdri_folder):
+            layout.label(text="Folder not found: %s"
+                         % _folder_label(hdri.hdri_folder), icon='ERROR')
             return
 
         # Trigger enum rebuild if needed, then check what we have
@@ -2598,8 +2608,12 @@ class LM_PT_IESPanel(bpy.types.Panel):
         row.prop(ies, "ies_folder", text="")
         row.operator("light_manager.ies_pick_folder", text="", icon='FILE_FOLDER')
 
-        if not ies.ies_folder or not os.path.isdir(ies.ies_folder):
+        if not ies.ies_folder:
             layout.label(text="Pick a folder with .ies", icon='INFO')
+            return
+        if not os.path.isdir(ies.ies_folder):
+            layout.label(text="Folder not found: %s"
+                         % _folder_label(ies.ies_folder), icon='ERROR')
             return
 
         # Trigger enum rebuild if needed, then check what we have

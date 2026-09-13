@@ -829,7 +829,9 @@ rv = ies_apply.execute(bpy.context)
 check("ies apply invalid -> CANCELLED", rv == {"CANCELLED"})
 
 # ---------------------------------------------------------------- ies prefs seed
-_prefs.ies_folder = "Z:/ies_lib"
+ies_lib = os.path.join(tmp, "ies_lib")
+os.makedirs(ies_lib)
+_prefs.ies_folder = ies_lib
 seed_scene = types.SimpleNamespace(
     lm_hdri=types.SimpleNamespace(hdri_folder=""),
     lm_ies=types.SimpleNamespace(ies_folder=""))
@@ -839,7 +841,20 @@ bpy.context = types.SimpleNamespace(
         "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
 ns["load_post_handler"](None)
 check("load_post seeds empty ies folder from prefs",
-      seed_scene.lm_ies.ies_folder == "Z:/ies_lib")
+      seed_scene.lm_ies.ies_folder == ies_lib)
+
+dead_prefs_scene = types.SimpleNamespace(
+    lm_hdri=types.SimpleNamespace(hdri_folder=""),
+    lm_ies=types.SimpleNamespace(ies_folder=""))
+_prefs.ies_folder = "Z:/gone/ies"
+bpy.context = types.SimpleNamespace(
+    scene=dead_prefs_scene,
+    preferences=types.SimpleNamespace(addons={
+        "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
+ns["load_post_handler"](None)
+check("load_post does not seed a dead prefs folder",
+      dead_prefs_scene.lm_ies.ies_folder == "")
+_prefs.ies_folder = ies_lib
 
 rmb_seed_scene = types.SimpleNamespace(
     lm_hdri=types.SimpleNamespace(hdri_folder="Z:/x", shift_rmb_rotate=True),
@@ -881,10 +896,28 @@ bpy.context = types.SimpleNamespace(
 ns["load_post_handler"](None)
 check("load_post seeds empty scene from prefs",
       fake_scene.lm_hdri.hdri_folder == expected)
-fake_scene.lm_hdri.hdri_folder = "Z:/keep/me"
+keep_dir = os.path.join(tmp, "keep_me")
+os.makedirs(keep_dir)
+fake_scene.lm_hdri.hdri_folder = keep_dir
 ns["load_post_handler"](None)
-check("load_post keeps non-empty scene folder",
-      fake_scene.lm_hdri.hdri_folder == "Z:/keep/me")
+check("load_post keeps live scene folder",
+      fake_scene.lm_hdri.hdri_folder == keep_dir)
+# v3.3: a dead saved folder (library moved) falls back to the live prefs
+fake_scene.lm_hdri.hdri_folder = "Z:/gone/library"
+ns["load_post_handler"](None)
+check("load_post repairs dead scene folder from prefs",
+      fake_scene.lm_hdri.hdri_folder == expected)
+# dead saved folder + dead prefs -> kept (panel shows 'Folder not found')
+fake_scene.lm_hdri.hdri_folder = "Z:/gone/library"
+_prefs.hdri_folder = "Z:/also/gone"
+ns["load_post_handler"](None)
+check("load_post keeps dead folder when nothing live exists",
+      fake_scene.lm_hdri.hdri_folder == "Z:/gone/library")
+_prefs.hdri_folder = expected
+check("folder label strips the path",
+      ns["_folder_label"](os.path.join(tmp, "hdris")) == "hdris")
+check("folder label falls back for a drive root",
+      ns["_folder_label"]("E:/") == "E:/")
 bpy.context = types.SimpleNamespace(
     scene=types.SimpleNamespace(lm_hdri=types.SimpleNamespace(hdri_folder="")),
     preferences=types.SimpleNamespace(addons={}))
