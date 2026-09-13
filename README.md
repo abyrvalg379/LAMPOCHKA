@@ -65,6 +65,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 - **Rotate: Shift+RMB** — toggle; when enabled, drag with **Shift + Right Mouse** in the viewport to spin the HDRI around Z. Ctrl+Z undoes the whole drag. The toggle is always off in a fresh session (resets on every file load) so the default navigation is never hijacked unexpectedly
 - Rotation and strength apply to the HDRI node setup even after re-applying a different HDRI
 - **Remembered folder** — the last picked HDRI folder is stored in add-on preferences and auto-filled in every new project; an individual `.blend` can still override it with its own folder
+- **Folder auto-repair (v3.3)** — if a saved folder no longer exists on disk (library moved or deleted), it is repaired on file load from preferences, then from the bundled team library. The same repair runs when you edit the folder in preferences. A dead path that cannot be repaired shows "Folder not found: …" in the panel instead of a misleading "no files" message; this applies to the HDRI, IES, Gobo and Presets browsers alike
 
 #### Where is the remembered folder stored?
 `Preferences → Add-ons / Get Extensions → LAMPOCHKA → Default HDRI Folder`.
