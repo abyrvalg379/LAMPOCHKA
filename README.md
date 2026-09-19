@@ -129,6 +129,7 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 ## Installation
 
 ### Ready-to-use archives
+Both are attached to the [latest release](https://github.com/abyrvalg379/LAMPOCHKA/releases/latest).
 - `lampochka_legacy.zip` — for Blender 3.6+
 - `lampochka_extension.zip` — for Blender 4.2+
 

@@ -129,6 +129,7 @@
 ## Установка
 
 ### Готовые архивы
+Оба приложены к [последнему релизу](https://github.com/abyrvalg379/LAMPOCHKA/releases/latest).
 - `lampochka_legacy.zip` — для Blender 3.6+
 - `lampochka_extension.zip` — для Blender 4.2+
 
