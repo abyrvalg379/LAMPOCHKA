@@ -2,7 +2,7 @@
 
 ![LAMPOCHKA](screen/LAMPOCHKA_cover.png)
 
-*Readme in Russian: [README_ru.md](README_ru.md)*
+*Документация на русском: [README.ru.md](README.ru.md)*
 
 Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
 

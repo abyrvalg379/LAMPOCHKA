@@ -2,7 +2,7 @@
 
 ![LAMPOCHKA](screen/LAMPOCHKA_cover.png)
 
-*English readme: [README.md](README.md)*
+*English documentation: [README.md](README.md)*
 
 Аддон Blender для управления всеми источниками света сцены из одной панели — плюс браузер HDRI-окружений.
 

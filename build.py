@@ -82,7 +82,7 @@ def main():
     with zipfile.ZipFile(leg_zip, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(LEGACY / "__init__.py", "lampochka/__init__.py")
 
-    for name in ("README.md", "README_ru.md", "LICENSE"):
+    for name in ("README.md", "README.ru.md", "LICENSE"):
         src = WORK / name
         if src.exists():
             shutil.copy2(src, dest / name)
