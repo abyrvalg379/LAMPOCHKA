@@ -190,4 +190,4 @@ Maksim Kovalev
 | [STUKACH](https://github.com/abyrvalg379/STUKACH) | Валидатор ассетов пайплайна для Blender |
 | [Switch_UDIM](https://github.com/abyrvalg379/Switch_UDIM) | Переключатель Single ↔ UDIM текстур |
 | [FLOMASTER](https://github.com/abyrvalg379/FLOMASTER) | OCIO-лаунчер для DCC |
-| [FILTER](https://github.com/abyrvalg379/FILTER) | Тумблеры видимости/выделения по типу, имени, коллекции |
+| [FILTER](https://github.com/abyrvalg379/FILTER) | Тумблеры видимости/выделения по типу, имени, коллекции + массовое управление модификаторами |
