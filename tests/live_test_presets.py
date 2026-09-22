@@ -390,6 +390,34 @@ try:
     check("surface operator registered",
           hasattr(m, "LM_OT_add_surface_light"))
 
+    # -- batch group ----------------------------------------------------------
+    for nm in ("BatchX", "BatchY"):
+        lt = bpy.data.lights.new(nm + "_d", 'POINT')
+        lt.energy = 50.0
+        ob = bpy.data.objects.new(nm, lt)
+        scene.collection.objects.link(ob)
+    scene.lm_settings.batch_mode = True
+    ToggleB = bpy.ops.light_manager.batch_toggle
+    ToggleB(light_name="BatchX")
+    ToggleB(light_name="BatchY")
+    scene.lm_settings.batch_power = 3.0
+    check("batch power scales group",
+          abs(bpy.data.objects["BatchX"].data.energy - 150.0) < 0.01
+          and abs(bpy.data.objects["BatchY"].data.energy - 150.0) < 0.01)
+    bpy.ops.light_manager.batch_visibility(visible=False)
+    check("batch hides", bpy.data.objects["BatchX"].hide_viewport
+          and bpy.data.objects["BatchY"].hide_viewport)
+    bpy.ops.light_manager.batch_visibility(visible=True)
+    check("batch shows", not bpy.data.objects["BatchX"].hide_viewport)
+    bpy.ops.light_manager.batch_clear()
+    check("batch cleared keeps tuned energies",
+          bpy.data.objects["BatchX"].get("lm_batch") is None
+          and scene.lm_settings.batch_power == 1.0
+          and abs(bpy.data.objects["BatchX"].data.energy - 150.0) < 0.01)
+    for nm in ("BatchX", "BatchY"):
+        bpy.data.objects.remove(bpy.data.objects[nm], do_unlink=True)
+    scene.lm_settings.batch_mode = False
+
     # -- package removal (Preferences operators) ---------------------------
     check("packages visible before removal",
           (os.path.isdir(os.path.join(lib, "mini_package")))

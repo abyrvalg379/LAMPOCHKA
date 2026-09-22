@@ -85,6 +85,26 @@ def sync_handler(scene):
         pass
 
 
+def _batch_lights(context):
+    """Objects currently in the batch group (marked with lm_batch)."""
+    return [ob for ob in get_scene_lights(context) if ob.get("lm_batch")]
+
+
+def update_batch_power(self, context):
+    """Batch power: scale every batch light relative to its base —
+    the base is captured when the light joins the group."""
+    factor = self.batch_power
+    for ob in _batch_lights(context):
+        data = ob.data
+        if data is None:
+            continue
+        base = data.get("lm_batch_base")
+        if base is None:
+            base = data.energy
+            data["lm_batch_base"] = base
+        data.energy = base * factor
+
+
 def _sync_light_slots(settings, lights):
     """Mirror the scene's light list into settings.lights_slots. Rewrites
     the collection only when the names actually differ, so depsgraph
@@ -123,6 +143,19 @@ class LM_SceneSettings(PropertyGroup):
         type=LM_LightSlot,
         name="Light Slots",
         description="Mirror of the scene's light list (fixed-height list)",
+    )
+    batch_mode: BoolProperty(
+        name="Batch",
+        default=False,
+        description="Batch mode: click light names to add/remove them "
+                    "from the batch group, then edit them together",
+    )
+    batch_power: FloatProperty(
+        name="Batch Power",
+        description="Power multiplier for the batch group "
+                    "(relative to their energies at collection time)",
+        default=1.0, min=0.0, max=10.0, soft_max=4.0,
+        update=update_batch_power,
     )
 
 
@@ -2280,6 +2313,77 @@ class LM_OT_preset_flip(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LM_OT_batch_toggle(bpy.types.Operator):
+    """Add the light to / remove it from the batch group."""
+    bl_idname = "light_manager.batch_toggle"
+    bl_label = "Toggle Batch"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    light_name: StringProperty()
+
+    def execute(self, context):
+        ob = bpy.data.objects.get(self.light_name)
+        if ob is None or ob.type != 'LIGHT':
+            return {'CANCELLED'}
+        if ob.get("lm_batch"):
+            try:
+                del ob["lm_batch"]
+            except KeyError:
+                pass
+            try:
+                del ob.data["lm_batch_base"]
+            except KeyError:
+                pass
+            return {'FINISHED'}
+        ob["lm_batch"] = 1
+        factor = context.scene.lm_settings.batch_power
+        base = ob.data.get("lm_batch_base")
+        if base is None:
+            base = ob.data.energy
+            ob.data["lm_batch_base"] = base
+        ob.data.energy = base * factor
+        return {'FINISHED'}
+
+
+class LM_OT_batch_visibility(bpy.types.Operator):
+    """Show / hide every light in the batch group."""
+    bl_idname = "light_manager.batch_visibility"
+    bl_label = "Batch Visibility"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    visible: BoolProperty(default=True)
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_batch_lights(context))
+
+    def execute(self, context):
+        for ob in _batch_lights(context):
+            ob.hide_viewport = not self.visible
+        return {'FINISHED'}
+
+
+class LM_OT_batch_clear(bpy.types.Operator):
+    """Empty the batch group (keeps the current energies)."""
+    bl_idname = "light_manager.batch_clear"
+    bl_label = "Clear Batch"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_batch_lights(context))
+
+    def execute(self, context):
+        for ob in _batch_lights(context):
+            for key in ("lm_batch", "lm_batch_base"):
+                try:
+                    del ob[key]
+                except KeyError:
+                    pass
+        context.scene.lm_settings.batch_power = 1.0
+        return {'FINISHED'}
+
+
 class LM_OT_preset_favorite(bpy.types.Operator):
     """Toggle the current setup as a favorite (heart icon)."""
     bl_idname = "light_manager.preset_favorite"
@@ -2932,11 +3036,17 @@ class LM_UL_Lights(bpy.types.UIList):
 
         row = layout.row(align=True)
 
-        # Name (click to select)
+        # Name: click to select, or batch add/remove in batch mode
         sub = row.row(align=True)
-        sub.active = is_selected
-        sub.operator("light_manager.select_light", text=obj.name,
-                     icon=get_light_icon(light)).index = index
+        sub.active = is_selected or bool(obj.get("lm_batch"))
+        if settings.batch_mode:
+            op = sub.operator("light_manager.batch_toggle", text=obj.name,
+                              icon=get_light_icon(light),
+                              depress=bool(obj.get("lm_batch")))
+            op.light_name = obj.name
+        else:
+            sub.operator("light_manager.select_light", text=obj.name,
+                         icon=get_light_icon(light)).index = index
 
         # Gear (click to open settings)
         op = row.operator("light_manager.toggle_settings", text="",
@@ -3003,6 +3113,7 @@ class LM_PT_MainPanel(bpy.types.Panel):
         row.separator()
         row.operator_menu_enum("light_manager.add_light", "light_type", text="", icon='ADD')
         row.operator_menu_enum("light_manager.add_surface_light", "light_type", text="", icon='FACESEL')
+        row.prop(settings, "batch_mode", text="", icon='CHECKBOX_HLT', toggle=True)
 
         # --- Light list: fixed height, internal scroll. The mirror lives
         # in settings.lights_slots and is synced by the depsgraph handler
@@ -3014,6 +3125,21 @@ class LM_PT_MainPanel(bpy.types.Panel):
                              settings, "lights_slots",
                              settings, "selected_index",
                              rows=8, maxrows=8)
+
+        # Batch group panel
+        batch = _batch_lights(context)
+        if settings.batch_mode or batch:
+            box = layout.box()
+            box.label(text="Batch: %d light(s)" % len(batch), icon='CHECKBOX_HLT')
+            if batch:
+                box.prop(settings, "batch_power", slider=True)
+                row = box.row(align=True)
+                row.operator("light_manager.batch_visibility",
+                             text="Show").visible = True
+                row.operator("light_manager.batch_visibility",
+                             text="Hide").visible = False
+                box.operator("light_manager.batch_clear",
+                             text="Clear Batch", icon='X')
 
         # Settings of the light whose gear is pressed — drawn below the
         # list so its height never disturbs the fixed-size list.
@@ -4079,6 +4205,9 @@ classes = (
     LM_AddonPreferences,
     LM_OT_select_light,
     LM_OT_solo_light,
+    LM_OT_batch_toggle,
+    LM_OT_batch_visibility,
+    LM_OT_batch_clear,
     LM_OT_cycle_select,
     LM_OT_toggle_visibility,
     LM_OT_toggle_render,

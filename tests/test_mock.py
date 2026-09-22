@@ -1776,6 +1776,9 @@ class FakeLightData:
     def __getitem__(self, key):
         return self._id[key]
 
+    def __delitem__(self, key):
+        del self._id[key]
+
 
 mirror.items = [FakeSlot(), FakeSlot(), FakeSlot()]
 mirror.items[0].name = "Key Light"
@@ -1817,6 +1820,55 @@ ns["update_preset_intensity"](IntensityClass(), None)
 check("intensity back to authored", ldata_a.energy == 100.0)
 _intensity_data_b = ldata_b  # empty has no light data — must be skipped
 _intensity_obj_b = obj_b
+
+# batch group: toggle collects with base, power scales, clear empties
+bdata_a = FakeLightData(80.0)
+bdata_b = FakeLightData(200.0)
+b_a = FakeObj('LIGHT', name="BatchA")
+b_a.data = bdata_a
+b_b = FakeObj('LIGHT', name="BatchB")
+b_b.data = bdata_b
+class _BatchObjs:
+    def __init__(self, objs):
+        self.objs = objs
+
+    def __iter__(self):
+        return iter(list(self.objs))
+
+
+batch_scene = types.SimpleNamespace(objects=_BatchObjs([b_a, b_b]))
+batch_ctx = types.SimpleNamespace(scene=types.SimpleNamespace(
+    objects=_BatchObjs([b_a, b_b]),
+    lm_settings=types.SimpleNamespace(batch_power=1.0)))
+bpy.data.objects = types.SimpleNamespace(
+    get=lambda n: {"BatchA": b_a, "BatchB": b_b}.get(n))
+
+Toggle = ns["LM_OT_batch_toggle"]
+t = Toggle()
+t.report = lambda t2, m: None
+t.light_name = "BatchA"
+t.execute(batch_ctx)
+t.light_name = "BatchB"
+t.execute(batch_ctx)
+check("batch collects with base", b_a.get("lm_batch") == 1
+      and bdata_a.get("lm_batch_base") == 80.0
+      and bdata_b.get("lm_batch_base") == 200.0)
+fake_batch_settings = types.SimpleNamespace(batch_power=2.0)
+ns["update_batch_power"](fake_batch_settings, batch_ctx)
+check("batch power x2", bdata_a.energy == 160.0 and bdata_b.energy == 400.0)
+ns["update_batch_power"](types.SimpleNamespace(batch_power=0.5), batch_ctx)
+check("batch power no compounding",
+      bdata_a.energy == 40.0 and bdata_b.energy == 100.0)
+t.light_name = "BatchA"
+t.execute(batch_ctx)
+check("batch remove clears base", b_a.get("lm_batch") is None
+      and bdata_a.get("lm_batch_base") is None)
+ClearOp = ns["LM_OT_batch_clear"]
+clr = ClearOp()
+clr.report = lambda t2, m: None
+check("batch clear finished", clr.execute(batch_ctx) == {'FINISHED'})
+check("batch clear empties group", ns["_batch_lights"](batch_ctx) == [])
+check("batch clear resets power", batch_ctx.scene.lm_settings.batch_power == 1.0)
 
 # preset rotation Z: roots get the angle stored, matrices are spun
 obj_a.matrix_world = FakeMat()
