@@ -149,10 +149,22 @@ try:
     check("preset markers set",
           all(ob.get("lm_preset") == 1 for ob in applied.values()))
 
-    # second apply replaces instead of stacking
+    # second apply replaces instead of stacking; with an active object the
+    # setup roots must land on its pivot
+    pivot = bpy.data.objects.new("PivotTarget", None)
+    scene.collection.objects.link(pivot)
+    pivot.location = (3.0, -4.0, 2.0)
+    bpy.context.view_layer.objects.active = pivot
     bpy.ops.light_manager.preset_apply()
     presets_coll = bpy.data.collections.get("Presets")
     check("second apply replaces", len(presets_coll.all_objects) == 2)
+    from mathutils import Vector
+    roots = [ob for ob in presets_coll.all_objects if ob.parent is None]
+    on_pivot = all(
+        (ob.matrix_world.translation - Vector((3.0, -4.0, 2.0))).length < 1e-5
+        for ob in roots)
+    check("setup roots on active pivot", bool(roots) and on_pivot,
+          [(ob.name, tuple(ob.matrix_world.translation)) for ob in roots])
 
     # -- clear lights -------------------------------------------------------
     res = bpy.ops.light_manager.clear_lights()
@@ -247,6 +259,42 @@ try:
             same += 1
     check("PLS color/energy 1:1 with source", same == len(ref_data)
           and len(ref_data) == 5, "%d/%d" % (same, len(ref_data)))
+
+    # master intensity: x2 then back, against the raw references
+    scene.lm_presets.preset_intensity = 2.0
+    presets_coll = bpy.data.collections.get("Presets")
+    lights_x2 = [ob for ob in presets_coll.all_objects if ob.type == 'LIGHT']
+    scaled = all(abs(l.data.energy - ref_data[l.name][1] * 2.0) < 0.01
+                 for l in lights_x2)
+    check("master intensity x2", scaled,
+          [(l.name, l.data.energy) for l in lights_x2])
+    scene.lm_presets.preset_intensity = 1.0
+    lights_bk = [ob for ob in presets_coll.all_objects if ob.type == 'LIGHT']
+    check("master intensity back to authored",
+          all(abs(l.data.energy - ref_data[l.name][1]) < 0.01
+              for l in lights_bk))
+
+    # rotation Z: spin the rig 90 deg around the root, height unchanged,
+    # back to zero restores authored positions
+    presets_coll = bpy.data.collections.get("Presets")
+    probe = next(ob for ob in presets_coll.all_objects
+                 if ob.type == 'LIGHT')
+    import math as _math
+    pos0 = tuple(bpy.context.view_layer.update() is None
+                 and probe.matrix_world.translation)
+    scene.lm_presets.preset_rotation_z = 1.5707963
+    bpy.context.view_layer.update()
+    pos90 = tuple(probe.matrix_world.translation)
+    check("rotation Z keeps height", abs(pos0[2] - pos90[2]) < 1e-5,
+          (pos0, pos90))
+    check("rotation Z moved the rig in XY",
+          abs(pos0[0] - pos90[0]) + abs(pos0[1] - pos90[1]) > 1e-4)
+    scene.lm_presets.preset_rotation_z = 0.0
+    bpy.context.view_layer.update()
+    pos_back = tuple(probe.matrix_world.translation)
+    check("rotation Z returns authored positions",
+          all(abs(a - b) < 1e-4 for a, b in zip(pos0, pos_back)),
+          (pos0, pos_back))
     res = bpy.ops.light_manager.clear_lights()
     check("PLS clear finished", res == {'FINISHED'})
 

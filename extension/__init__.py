@@ -11,7 +11,7 @@ import shutil
 import zipfile
 
 import bpy
-from mathutils import Vector
+from mathutils import Vector, Matrix
 from bpy.props import (
     StringProperty,
     IntProperty,
@@ -107,6 +107,11 @@ def _sync_light_slots(settings, lights):
 class LM_LightSlot(PropertyGroup):
     """Mirror entry of one scene light for the template_list; the built-in
     .name holds the light object name."""
+
+
+class LM_FavoriteSlot(PropertyGroup):
+    """Favorite preset entry; the built-in .name holds the key
+    '<blend file name>::<collection name>' (no absolute paths)."""
 
 
 class LM_SceneSettings(PropertyGroup):
@@ -525,6 +530,11 @@ class LM_AddonPreferences(AddonPreferences):
         description="Folder used when the current scene has no presets "
                     "folder set",
     )
+    favorites: CollectionProperty(
+        type=LM_FavoriteSlot,
+        name="Favorite Setups",
+        description="Preset setups marked as favorites (global)",
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -532,6 +542,8 @@ class LM_AddonPreferences(AddonPreferences):
         layout.prop(self, "ies_folder")
         layout.prop(self, "gobo_folder")
         layout.prop(self, "presets_folder")
+        if len(self.favorites):
+            layout.label(text="Favorite setups: %d" % len(self.favorites))
 
         box = layout.box()
         box.label(text="Installed Preset Packages")
@@ -1701,6 +1713,66 @@ def preset_enum_items(self, context):
     return _presets_enum_cache
 
 
+def _favorite_key(entry):
+    """Stable favorite id: '<blend file name>::<collection name>' —
+    survives moving the presets folder to another disk."""
+    blend = os.path.splitext(os.path.basename(entry["blend"]))[0]
+    return "%s::%s" % (blend, entry["collection"])
+
+
+def _preset_favorites(context):
+    prefs = get_lm_prefs(context)
+    coll = getattr(prefs, "favorites", None) if prefs else None
+    return {e.name for e in coll} if coll else set()
+
+
+def _toggle_favorite(context, entry):
+    """Add/remove the setup in favorites; returns the new state or None
+    when preferences are unavailable."""
+    prefs = get_lm_prefs(context)
+    if prefs is None or not hasattr(prefs, "favorites"):
+        return None
+    key = _favorite_key(entry)
+    coll = prefs.favorites
+    idx = coll.find(key)
+    if idx >= 0:
+        coll.remove(idx)
+        return False
+    slot = coll.add()
+    slot.name = key
+    return True
+
+
+def _visible_preset_items(context):
+    """Enum cache entries the carousel should show: everything, or only
+    favorites when the favorites toggle is on."""
+    presets = context.scene.lm_presets
+    cache = _presets_enum_cache
+    if not getattr(presets, "show_favorites", False):
+        return cache
+    favs = _preset_favorites(context)
+    return [it for it in cache
+            if _favorite_key(_presets_catalog[int(it[0])]) in favs]
+
+
+def _preset_cycle(context, step):
+    """Move the preset selection by step setups among the visible ones
+    (update applies it)."""
+    visible = _visible_preset_items(context)
+    if not visible:
+        return {'CANCELLED'}
+    presets = context.scene.lm_presets
+    ids = [it[0] for it in visible]
+    try:
+        pos = ids.index(presets.selected_preset)
+    except ValueError:
+        # Unknown selection: next starts from the first, prev from the last
+        presets.selected_preset = ids[0] if step > 0 else ids[-1]
+        return {'FINISHED'}
+    presets.selected_preset = ids[(pos + step) % len(ids)]
+    return {'FINISHED'}
+
+
 def _print_report(level, message):
     """Report shim for calls outside an operator (enum update callback)."""
     print("[LAMPOCHKA]", level, message)
@@ -1744,6 +1816,37 @@ def _apply_setup_collection(context, report):
     _remove_collection_tree(setup_coll)
     context.view_layer.update()
 
+    # Place the setup on the active object's pivot: shift every root of the
+    # appended hierarchy (the parent empty first) so the rig aims at what
+    # the user is lighting. No active object — keep authored coordinates.
+    active = getattr(context, "active_object", None)
+    if active is not None:
+        roots = [ob for ob in applied if ob.parent is None]
+        if roots:
+            delta = (active.matrix_world.translation
+                     - roots[0].matrix_world.translation)
+            for ob in roots:
+                ob.location = ob.location + delta
+            context.view_layer.update()
+
+    # Authored orientation + the current rotation slider angle. Appended
+    # roots start clean, so the slider angle is the full rotation.
+    if presets.preset_rotation_z:
+        _apply_preset_rotation(context, presets.preset_rotation_z)
+
+    # Master intensity: remember authored energies, apply the current
+    # factor. A base already stored on the data (from an earlier save or a
+    # LAMPOCHKA-authored package) wins — repeated applies never compound.
+    factor = presets.preset_intensity
+    for ob in applied:
+        if ob.type == 'LIGHT':
+            data = ob.data
+            base = data.get("lm_base_energy")
+            if base is None:
+                base = data.energy
+            data["lm_base_energy"] = base
+            data.energy = base * factor
+
     missing = _missing_preset_images(applied)
     if missing:
         report({'WARNING'},
@@ -1767,22 +1870,60 @@ def update_preset_selected(self, context):
         pass
 
 
-def _preset_cycle(context, step):
-    """Move the preset selection by step setups (update applies it)."""
-    if not _presets_catalog:
-        return {'CANCELLED'}
-    presets = context.scene.lm_presets
+def update_preset_intensity(self, context):
+    """Master intensity: scale every applied preset light relative to its
+    stored base energy (no compounding on repeated updates)."""
+    coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+    if coll is None:
+        return
+    factor = self.preset_intensity
+    for ob in coll.objects:
+        if ob.type != 'LIGHT':
+            continue
+        data = ob.data
+        if data is None:
+            continue
+        base = data.get("lm_base_energy")
+        if base is None:
+            base = data.energy
+        data["lm_base_energy"] = base
+        data.energy = base * factor
+
+
+def _apply_preset_rotation(context, angle):
+    """Rotate the applied preset's root objects (the parent empty first)
+    to the given Z angle. The angle already applied to the roots (stored
+    on them as an ID prop) is subtracted, so repeated applies and slider
+    moves never compound."""
+    coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+    if coll is None:
+        return
+    roots = [ob for ob in coll.objects
+             if getattr(ob, "parent", None) is None]
+    if not roots:
+        return
     try:
-        idx = int(presets.selected_preset)
-        if not 0 <= idx < len(_presets_catalog):
-            raise ValueError
-    except (TypeError, ValueError):
-        # Unknown selection: next starts from the first, prev from the last
-        presets.selected_preset = str(0 if step > 0
-                                      else len(_presets_catalog) - 1)
-        return {'FINISHED'}
-    presets.selected_preset = str((idx + step) % len(_presets_catalog))
-    return {'FINISHED'}
+        old = float(roots[0].get("lm_rot_z", 0.0))
+    except Exception:
+        old = 0.0
+    delta = float(angle) - old
+    if abs(delta) < 1e-9:
+        return
+    context.view_layer.update()
+    rot = Matrix.Rotation(delta, 4, 'Z')
+    for ob in roots:
+        ob.matrix_world = rot @ ob.matrix_world
+        ob["lm_rot_z"] = float(angle)
+    context.view_layer.update()
+
+
+def update_preset_rotation(self, context):
+    """Rotation slider: spin the applied preset's parent empty around
+    world Z to the new angle."""
+    try:
+        _apply_preset_rotation(context, self.preset_rotation_z)
+    except Exception:
+        pass
 
 
 class LM_PresetSettings(PropertyGroup):
@@ -1798,6 +1939,27 @@ class LM_PresetSettings(PropertyGroup):
         update=update_preset_selected,
         description="Light setups found in the installed packages "
                     "(switching applies immediately)",
+    )
+    # Master intensity: scale the applied preset's lights against their
+    # authored energies; survives save/load via the base stored on the data
+    preset_intensity: FloatProperty(
+        name="Intensity",
+        description="Master intensity multiplier for the applied preset "
+                    "(1.0 = authored values)",
+        default=1.0, min=0.0, max=10.0, soft_max=4.0,
+        update=update_preset_intensity,
+    )
+    preset_rotation_z: FloatProperty(
+        name="Pivot Rotation Z",
+        description="Rotate the applied preset around its parent empty "
+                    "(world Z axis)",
+        default=0.0, subtype='ANGLE',
+        update=update_preset_rotation,
+    )
+    show_favorites: BoolProperty(
+        name="Favorites Only",
+        default=False,
+        description="Show only favorite setups in the carousel",
     )
     preset_name: StringProperty(
         name="Name",
@@ -2076,6 +2238,28 @@ class LM_OT_preset_package_remove_all(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LM_OT_preset_favorite(bpy.types.Operator):
+    """Toggle the current setup as a favorite (heart icon)."""
+    bl_idname = "light_manager.preset_favorite"
+    bl_label = "Favorite"
+    bl_options = {'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        return _selected_setup(context.scene.lm_presets) is not None
+
+    def execute(self, context):
+        setup = _selected_setup(context.scene.lm_presets)
+        state = _toggle_favorite(context, setup)
+        if state is None:
+            self.report({'ERROR'}, "Preferences unavailable")
+            return {'CANCELLED'}
+        self.report({'INFO'},
+                    ("Added to favorites: " if state else "Removed from favorites: ")
+                    + setup["collection"])
+        return {'FINISHED'}
+
+
 class LM_OT_preset_apply(bpy.types.Operator):
     """Append the selected setup collection from its package .blend —
     hierarchies, node trees and transforms arrive exactly as authored."""
@@ -2154,6 +2338,8 @@ class LM_PT_PresetsPanel(bpy.types.Panel):
         row.prop(presets, "preset_folder", text="")
         row.operator("light_manager.preset_pick_folder", text="",
                      icon='FILE_FOLDER')
+        row.prop(presets, "show_favorites", text="", icon='HEART',
+                 toggle=True)
 
         if not presets.preset_folder:
             layout.label(text="Pick a folder for preset packages",
@@ -2168,37 +2354,48 @@ class LM_PT_PresetsPanel(bpy.types.Panel):
         if not _presets_enum_cache:
             layout.label(text="No setups found — install a package zip",
                          icon='INFO')
-        else:
-            # Carousel: previous / active / next. Switching applies the
-            # setup immediately (enum update), like the HDRI browser.
-            cache = _presets_enum_cache
-            total = len(cache)
-            try:
-                active = int(presets.selected_preset)
-            except (TypeError, ValueError):
-                active = 0
-            if not 0 <= active < total:
-                active = 0
-            row = layout.row(align=True)
-            for offset in (-1, 0, 1):
-                item = cache[(active + offset) % total]
-                name, icon = item[1], item[3]
-                col = row.column(align=True)
-                if isinstance(icon, int) and icon:
-                    try:
-                        col.template_icon(icon_value=icon, scale=4.5)
-                    except Exception:
-                        pass
-                short = name if len(name) <= 12 else name[:11] + "…"
-                op = col.operator("light_manager.preset_card", text=short,
-                                  depress=(offset == 0))
-                op.index = int(item[0])
+            return
+        visible = _visible_preset_items(context)
+        if not visible:
+            layout.label(text="No favorites yet — mark setups with the "
+                              "heart", icon='INFO')
+            return
 
-            row = layout.row(align=True)
-            row.operator("light_manager.preset_prev", text="", icon='TRIA_LEFT')
-            setup = _selected_setup(presets)
-            row.label(text=setup["collection"] if setup else "—", icon='FILE')
-            row.operator("light_manager.preset_next", text="", icon='TRIA_RIGHT')
+        # Carousel: previous / active / next among the visible setups.
+        # Switching applies immediately (enum update), like the HDRI
+        # browser.
+        total = len(visible)
+        try:
+            active = [it[0] for it in visible].index(presets.selected_preset)
+        except ValueError:
+            active = 0
+        row = layout.row(align=True)
+        for offset in (-1, 0, 1):
+            item = visible[(active + offset) % total]
+            name, icon = item[1], item[3]
+            col = row.column(align=True)
+            if isinstance(icon, int) and icon:
+                try:
+                    col.template_icon(icon_value=icon, scale=4.5)
+                except Exception:
+                    pass
+            short = name if len(name) <= 12 else name[:11] + "…"
+            op = col.operator("light_manager.preset_card", text=short,
+                              depress=(offset == 0))
+            op.index = int(item[0])
+
+        row = layout.row(align=True)
+        row.operator("light_manager.preset_prev", text="", icon='TRIA_LEFT')
+        setup = _selected_setup(presets)
+        is_fav = (setup is not None
+                  and _favorite_key(setup) in _preset_favorites(context))
+        row.operator("light_manager.preset_favorite", text="",
+                     icon='HEART', depress=is_fav)
+        row.label(text=setup["collection"] if setup else "—", icon='FILE')
+        row.operator("light_manager.preset_next", text="", icon='TRIA_RIGHT')
+
+        layout.prop(presets, "preset_intensity", slider=True)
+        layout.prop(presets, "preset_rotation_z")
 
         col = layout.column(align=True)
         col.prop(presets, "preset_name", text="")
@@ -3601,6 +3798,7 @@ class LM_OT_ies_remove(bpy.types.Operator):
 # ---------------------------------------------------------------------------
 
 classes = (
+    LM_FavoriteSlot,
     LM_LightSlot,
     LM_SceneSettings,
     LM_HDRISettings,
@@ -3640,6 +3838,7 @@ classes = (
     LM_OT_preset_card,
     LM_OT_preset_prev,
     LM_OT_preset_next,
+    LM_OT_preset_favorite,
     LM_OT_preset_install_zip,
     LM_OT_preset_package_remove,
     LM_OT_preset_package_remove_all,

@@ -354,6 +354,24 @@ class FakeVec:
 
 mathutils.Vector = FakeVec
 
+
+class FakeMatrix:
+    @staticmethod
+    def Rotation(angle, size, axis):
+        m = FakeMat()
+        m.angle = angle
+        return m
+
+
+class FakeMat:
+    angle = 0.0
+
+    def __matmul__(self, other):
+        return other
+
+
+mathutils.Matrix = FakeMatrix
+
 for mod in (bpy, bpy.types, bpy.props, bpy.utils, bpy.app, bpy.app.handlers,
             bpy_extras, io_utils, mathutils):
     sys.modules[mod.__name__] = mod
@@ -1744,6 +1762,21 @@ class FakeUL:
     bitflag_filter_item = 1
 
 
+class FakeLightData:
+    def __init__(self, energy):
+        self.energy = energy
+        self._id = {}
+
+    def get(self, key, default=None):
+        return self._id.get(key, default)
+
+    def __setitem__(self, key, value):
+        self._id[key] = value
+
+    def __getitem__(self, key):
+        return self._id[key]
+
+
 mirror.items = [FakeSlot(), FakeSlot(), FakeSlot()]
 mirror.items[0].name = "Key Light"
 mirror.items[1].name = "Rim Light"
@@ -1761,6 +1794,42 @@ fake_settings_mirror.filter_name = "SUN"
 flt, _ = FI(FakeUL(), None, fake_settings_mirror, "lights_slots")
 check("list filter: case-insensitive", flt == [0, 0, 1])
 fake_settings_mirror.filter_name = ""
+
+# master preset intensity
+int_coll = _coll_store.new("Presets")
+ldata_a = FakeLightData(100.0)
+ldata_b = FakeLightData(400.0)
+obj_a = FakeObj('LIGHT', name="iKey")
+obj_a.data = ldata_a
+obj_b = FakeObj('EMPTY', name="iRig")
+int_coll.objects.link(obj_a)
+int_coll.objects.link(obj_b)
+IntensityClass = type("IS", (), {"preset_intensity": 2.0})
+ns["update_preset_intensity"](IntensityClass(), None)
+check("intensity x2 scales preset lights", ldata_a.energy == 200.0)
+check("intensity stores base energy", ldata_a.get("lm_base_energy") == 100.0)
+IntensityClass.preset_intensity = 1.5
+ns["update_preset_intensity"](IntensityClass(), None)
+check("intensity no compounding (base x1.5 = 150)",
+      ldata_a.energy == 150.0)
+IntensityClass.preset_intensity = 1.0
+ns["update_preset_intensity"](IntensityClass(), None)
+check("intensity back to authored", ldata_a.energy == 100.0)
+_intensity_data_b = ldata_b  # empty has no light data — must be skipped
+_intensity_obj_b = obj_b
+
+# preset rotation Z: roots get the angle stored, matrices are spun
+obj_a.matrix_world = FakeMat()
+obj_b.matrix_world = FakeMat()
+rot_ctx = types.SimpleNamespace(
+    view_layer=types.SimpleNamespace(update=lambda: None))
+RotClass = type("RS", (), {"preset_rotation_z": 1.5707963})
+ns["update_preset_rotation"](RotClass(), rot_ctx)
+check("rotation stores angle on roots",
+      obj_a["lm_rot_z"] == 1.5707963 and obj_b["lm_rot_z"] == 1.5707963)
+RotClass.preset_rotation_z = 0.0
+ns["update_preset_rotation"](RotClass(), rot_ctx)
+check("rotation back to zero", obj_a["lm_rot_z"] == 0.0)
 
 catalog = [{"blend": "a.blend", "collection": "S0"},
            {"blend": "a.blend", "collection": "S1"},
@@ -1807,10 +1876,14 @@ check("cycle from empty selection: prev -> last",
       and len(_apply_calls) == 6)
 
 ns["_presets_catalog"] = []
+ns["_presets_enum_cache"] = []
 check("cycle cancels with empty catalog",
       ns["_preset_cycle"](car_ctx, 1) == {'CANCELLED'})
 
 ns["_presets_catalog"] = catalog
+ns["_presets_enum_cache"] = [("0", "S0", "a.blend", 'FILE', 0),
+                             ("1", "S1", "a.blend", 'FILE', 1),
+                             ("2", "S2", "a.blend", 'FILE', 2)]
 Card = ns["LM_OT_preset_card"]
 card = Card()
 card.index = 0
@@ -1820,6 +1893,93 @@ ns["update_preset_selected"](None, car_ctx)
 check("card applies by index",
       carousel_scene.lm_presets.selected_preset == "0"
       and len(_apply_calls) == 7)
+
+# favorites: keys, toggle, carousel filtering
+check("favorite key format",
+      ns["_favorite_key"]({"blend": "x/y/Pack.blend", "collection": "Kill Phil"})
+      == "Pack::Kill Phil")
+
+# real files: _selected_setup checks os.path.isfile
+catalog = [{"blend": os.path.join(pk, "a.blend"), "collection": "S0"},
+           {"blend": os.path.join(pk, "a.blend"), "collection": "S1"},
+           {"blend": os.path.join(pk, "a.blend"), "collection": "S2"}]
+open(os.path.join(pk, "a.blend"), "wb").close()
+ns["_presets_catalog"] = catalog
+
+
+class FakeFavorites:
+    """CollectionProperty stand-in: iteration yields .name objects."""
+
+    def __init__(self):
+        self.items = []
+
+    def find(self, key):
+        for i, item in enumerate(self.items):
+            if item.name == key:
+                return i
+        return -1
+
+    def remove(self, i):
+        self.items.pop(i)
+
+    def add(self):
+        s = types.SimpleNamespace(name="")
+        self.items.append(s)
+        return s
+
+    def __iter__(self):
+        return iter(list(self.items))
+
+
+fake_prefs = types.SimpleNamespace(favorites=FakeFavorites())
+ns["get_lm_prefs"] = lambda ctx: fake_prefs
+
+_toggle = ns["_toggle_favorite"]
+check("favorite toggle adds", _toggle(car_ctx, catalog[0]) is True
+      and [e.name for e in fake_prefs.favorites] == ["a::S0"])
+check("favorite toggle removes", _toggle(car_ctx, catalog[0]) is False
+      and [e.name for e in fake_prefs.favorites] == [])
+_toggle(car_ctx, catalog[2])
+check("favorites set view",
+      ns["_preset_favorites"](car_ctx) == {"a::S2"})
+
+vis = ns["_visible_preset_items"](car_ctx)
+check("visible = all when favorites off", [it[0] for it in vis] == ["0", "1", "2"])
+carousel_scene.lm_presets.show_favorites = True
+vis = ns["_visible_preset_items"](car_ctx)
+check("visible = favorites only", [it[0] for it in vis] == ["2"])
+
+
+def cycle_mock_fav(ctx, step):
+    res = ns["_preset_cycle"](ctx, step)
+    ns["update_preset_selected"](None, ctx)
+    return res
+
+
+carousel_scene.lm_presets.selected_preset = "2"
+check("cycle in favorites stays within favorites",
+      cycle_mock_fav(car_ctx, 1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "2"
+      and len(_apply_calls) == 8)
+carousel_scene.lm_presets.selected_preset = "0"   # not a favorite
+check("cycle from hidden selection: next -> first favorite",
+      cycle_mock_fav(car_ctx, 1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "2"
+      and len(_apply_calls) == 9)
+carousel_scene.lm_presets.show_favorites = False
+carousel_scene.lm_presets.selected_preset = "1"
+check("cycle back to all presets",
+      cycle_mock_fav(car_ctx, -1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "0")
+
+FavoriteOp = ns["LM_OT_preset_favorite"]
+fav_op = FavoriteOp()
+fav_op.report = lambda t, m: None
+carousel_scene.lm_presets.show_favorites = False
+carousel_scene.lm_presets.selected_preset = "1"
+check("favorite operator poll", FavoriteOp.poll(car_ctx))
+check("favorite operator adds", fav_op.execute(car_ctx) == {'FINISHED'}
+      and "a::S1" in [e.name for e in fake_prefs.favorites])
 
 ns["_apply_setup_collection"] = _orig_apply
 ns["_presets_catalog"] = []
