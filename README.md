@@ -6,7 +6,7 @@
 
 Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
 
-**Blender 3.6+ / 4.2+ · Author: Maksim Kovalev**
+**Blender 4.2+ · Author: Maksim Kovalev**
 
 ---
 
@@ -85,18 +85,20 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - **Apply IES** — builds the IES node setup on the **active light** (Point or Spot): `IES → Emission → Output`
 - If the light already has the LAMPOCHKA IES setup, only the file is swapped; if it has an Emission chain, the IES node is inserted without destroying nodes
 - **Remove IES** strips the IES node from the active light
-- **Per-light IES settings**: **Power** (brightness multiplier for the profile) and **Mix** (0–100%: how strongly the profile shapes the light vs uniform output); presets save/restore both
+- **Per-light IES settings**: **Power** (brightness multiplier for the profile) and **Mix** (0–100%: how strongly the profile shapes the light vs uniform output)
 - IES profiles work in **Cycles only** (the panel warns when another engine is active)
 - The last picked folder is remembered in preferences, same as HDRI
 
-### Light Setup Presets (v3.1)
-- Collapsible **Presets** sub-panel: save the whole light setup of the scene as a JSON file and load it into any scene later
-- Pick a presets folder — `.json` setups appear as a grid (optional previews from `thumbnails/<name>.png`)
-- **Save Setup** — writes every scene light to JSON: type, power, color/Kelvin, size parameters, transforms, shadow, IES/gobo paths. Use meaningful names for your lights (Key, Rim, Fill) — the preset reads as a lighting scheme
-- **Apply** — creates the lights from the selected preset, marked and grouped under a `lm_preset` empty; applying another preset replaces the previous preset lights (your own lights are never touched)
-- **Clear Lights** — removes all lights that came from a LAMPOCHKA preset
-- Missing IES/gobo files are reported on apply instead of failing silently
-- Personal library conversion: any folder of `.blend` files with light rigs (e.g. your own Pro-Lighting Studio library) can be converted to JSON presets with the included `convert_presets.py` (runs headless); each named collection becomes its own preset. Not for redistributing third-party libraries
+### Light Setup Presets
+- Collapsible **Presets** sub-panel: light setups live as `.blend` packages, applied by appending the setup collection — empty hierarchies, light node trees and world transforms arrive exactly as authored
+- **Install from Zip** — install one or more preset packages from `.zip` archives; each zip becomes a sub-folder of your presets folder. PLS-compatible layout (`library/*.blend` + `library/thumbs/`) is flattened automatically
+- Pick a presets folder — every collection of every `.blend` in the folder (recursive) appears as a setup in the grid; optional previews from `thumbs/<name>.png` or `thumbnails/<name>.png` beside the package
+- **Save Setup** — writes the scene's lights (with their parent empties and rig subtrees) as a `.blend` setup into the presets folder. Use meaningful names for your lights (Key, Rim, Fill) — the setup reads as a lighting scheme
+- **Carousel browsing** — one row of preview cards (previous / active / next) with ◀ ▶ arrows, like the HDRI browser; **switching presets applies them immediately**, no separate Apply click. Clicking a neighbouring card jumps to it; the catalog wraps around
+- **Apply** — re-applies the selected setup on demand
+- **Clear Lights** — removes all objects that came from a LAMPOCHKA preset
+- **Preferences → Installed Preset Packages** — every installed package with its blend count and a remove button per package, plus *Remove All Packages* (with confirmation). Lives in Preferences only — too dangerous for the sidebar
+- Unresolved image textures (a package installed without its `textures/` folder) are reported on apply instead of failing silently
 
 ### Interactive Placement (v3)
 - **Cursor button** on each light row is the master switch, manual only:
@@ -122,23 +124,14 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - **Per-light projection settings** (stored on the light, so every gobo is independent):
   **Rotation**, **Scale X / Y** (stretch patterns into blinds/stripes), **Offset X / Y**,
   **Mix** (0–100%: gobo as an accent over the base light output), **Invert** and **Flip X**
-- Presets save and restore the gobo settings together with the texture path
+- Presets keep the gobo texture and node chain (the per-light gobo knobs reset to defaults on apply)
 - **Remove Gobo** strips the gobo nodes and restores the previous color source
 - The last picked folder is remembered in preferences, same as HDRI and IES
 
 ## Installation
 
-### Ready-to-use archives
-Both are attached to the [latest release](https://github.com/abyrvalg379/LAMPOCHKA/releases/latest).
-- `lampochka_legacy.zip` — for Blender 3.6+
-- `lampochka_extension.zip` — for Blender 4.2+
+`lampochka_extension.zip` is attached to the [latest release](https://github.com/abyrvalg379/LAMPOCHKA/releases/latest).
 
-### Legacy (Blender 3.6+)
-1. `Edit → Preferences → Add-ons → Install`
-2. Select `lampochka_legacy.zip`
-3. Enable "LAMPOCHKA"
-
-### Extension (Blender 4.2+)
 1. `Edit → Preferences → Get Extensions`
 2. ⚙ → `Install from Disk...`
 3. Select `lampochka_extension.zip`
@@ -158,7 +151,6 @@ LAMPOCHKA/
     ├── extension/             ← Blender 4.2+ (manifest, no bl_info)
     │   ├── __init__.py
     │   └── blender_manifest.toml
-    ├── legacy/lampochka/      ← Blender 3.6+ (with bl_info)
     ├── screen/                ← cover & panel screenshots
     ├── tests/test_mock.py     ← mock test suite, runs without Blender
     └── ROADMAP.md             ← development history & plans
@@ -166,7 +158,7 @@ LAMPOCHKA/
 
 ## Requirements
 
-Blender 3.6+ (legacy) or 4.2+ (extension)
+Blender 4.2+
 
 ## License
 

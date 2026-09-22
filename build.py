@@ -1,12 +1,11 @@
-"""Build LAMPOCHKA: generate legacy from extension + zips into out/v<version>.
+"""Build LAMPOCHKA: extension-only zip into out/v<version>.
 
-The legacy package gets a generated bl_info preamble. The v2.4.1/v2.5.0
-regression (legacy shipped without bl_info) must never repeat, so this
-script is the only supported way to build the zips.
+Legacy (Blender 3.6) support is dropped by decision of 2026-09-22 —
+the extension targets Blender 4.2+ and is the only build.
 
 Usage: python build.py            — public build (no libraries)
-       python build.py --team     — also builds team zips with the personal
-                                    library bundled (NOT for publishing)
+       python build.py --team     — also builds the team zip with the
+                                    personal library bundled (NOT for publishing)
 """
 
 import re
@@ -17,9 +16,8 @@ from pathlib import Path
 
 WORK = Path(__file__).resolve().parent
 EXT = WORK / "extension"
-LEGACY = WORK / "legacy" / "lampochka"
 OUT = WORK.parent / "out"
-# personal library (PLS/Lumio derived) — bundled ONLY into team zips
+# personal library (PLS/Lumio derived) — bundled ONLY into the team zip
 LIB_SOURCES = {
     "presets": WORK.parent / "presets" / "PLS",
     "gobos": WORK.parent / "presets" / "gobos",
@@ -36,24 +34,10 @@ TEAM_NOTE = """LAMPOCHKA TEAM BUILD — внутренняя сборка для
 (Pro-Lighting Studio, Lumio). Использовать только внутри студии.
 НЕ публиковать и НЕ передавать третьим лицам.
 
-Установка: как обычный аддон (Install from Disk / Install).
+Установка: как обычное расширение (Install from Disk).
 Папки библиотек подхватятся автоматически; свои пути можно задать
 в панели и в Preferences — они имеют приоритет.
 """
-
-BL_INFO = '''"""LAMPOCHKA — manage all lights in the scene."""
-bl_info = {
-    "name": "LAMPOCHKA",
-    "author": "Maksim Kovalev",
-    "version": (%VERSION%),
-    "blender": (3, 6, 0),
-    "location": "View3D > Sidebar (N) > LAMPOCHKA",
-    "description": "Manage all lights in the scene + HDRI/IES/Gobo browsers, sun helper, light linking, presets",
-    "doc_url": "https://github.com/abyrvalg379/lampochka",
-    "license": "GPL-3.0-or-later",
-    "category": "Lighting",
-}
-'''
 
 
 def main():
@@ -62,13 +46,7 @@ def main():
     ver = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', manifest, re.MULTILINE)
     if not ver:
         sys.exit("build.py: no version line in blender_manifest.toml")
-    v = tuple(int(g) for g in ver.groups())
-    version = ".".join(str(x) for x in v)
-
-    body = (EXT / "__init__.py").read_text(encoding="utf-8")
-    header = BL_INFO.replace("%VERSION%", "{}, {}, {}".format(v[0], v[1], v[2]))
-    LEGACY.mkdir(parents=True, exist_ok=True)
-    (LEGACY / "__init__.py").write_text(header + "\n" + body, encoding="utf-8")
+    version = ".".join(ver.groups())
 
     dest = OUT / f"v{version}"
     dest.mkdir(parents=True, exist_ok=True)
@@ -78,10 +56,6 @@ def main():
         z.write(EXT / "__init__.py", "__init__.py")
         z.write(EXT / "blender_manifest.toml", "blender_manifest.toml")
 
-    leg_zip = dest / "lampochka_legacy.zip"
-    with zipfile.ZipFile(leg_zip, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(LEGACY / "__init__.py", "lampochka/__init__.py")
-
     for name in ("README.md", "README.ru.md", "LICENSE"):
         src = WORK / name
         if src.exists():
@@ -89,10 +63,9 @@ def main():
 
     print(f"v{version}:")
     print(f"  {ext_zip}")
-    print(f"  {leg_zip}")
 
     if "--team" in sys.argv:
-        build_team(dest, version, body)
+        build_team(dest)
 
 
 def _add_library(z, arc_prefix):
@@ -119,26 +92,17 @@ def _add_library(z, arc_prefix):
     return count
 
 
-def build_team(dest, version, body):
-    header = BL_INFO.replace("%VERSION%", "{}, {}, {}".format(*version.split(".")))
+def build_team(dest):
     note_dest = dest / "TEAM_BUILD.txt"
     note_dest.write_text(TEAM_NOTE, encoding="utf-8")
 
     ext_zip = dest / "lampochka_team_extension.zip"
     with zipfile.ZipFile(ext_zip, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("__init__.py", body)
-        z.writestr("blender_manifest.toml",
-                   (EXT / "blender_manifest.toml").read_text(encoding="utf-8"))
-        z.writestr("TEAM_BUILD.txt", TEAM_NOTE)
+        z.write(EXT / "__init__.py", "__init__.py")
+        z.write(EXT / "blender_manifest.toml", "blender_manifest.toml")
+        z.write(note_dest, "TEAM_BUILD.txt")
         n = _add_library(z, "libraries")
     print(f"  team: {ext_zip} ({n} library files)")
-
-    leg_zip = dest / "lampochka_team_legacy.zip"
-    with zipfile.ZipFile(leg_zip, "w", zipfile.ZIP_DEFLATED) as z:
-        z.writestr("lampochka/__init__.py", header + chr(10) + body)
-        z.writestr("lampochka/TEAM_BUILD.txt", TEAM_NOTE)
-        _add_library(z, "lampochka/libraries")
-    print(f"  team: {leg_zip}")
 
 
 if __name__ == "__main__":
