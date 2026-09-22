@@ -287,6 +287,7 @@ bpy.types.Scene = type("Scene", (), {})
 bpy.types.Object = type("Object", (), {})
 bpy.types.Light = type("Light", (), {})
 bpy.types.AddonPreferences = type("AddonPreferences", (), {})
+bpy.types.UIList = type("UIList", (), {})
 
 bpy.props = types.ModuleType("bpy.props")
 bpy.props.StringProperty = lambda **kw: None
@@ -296,6 +297,7 @@ bpy.props.FloatProperty = lambda **kw: None
 bpy.props.FloatVectorProperty = lambda **kw: None
 bpy.props.EnumProperty = lambda **kw: kw          # keep kwargs for callback test
 bpy.props.PointerProperty = lambda **kw: None
+bpy.props.CollectionProperty = lambda **kw: None
 
 _registered = []
 bpy.utils = types.ModuleType("bpy.utils")
@@ -1464,6 +1466,367 @@ check("object kelvin props removed",
       not hasattr(bpy.types.Object, "lm_use_temperature")
       and not hasattr(bpy.types.Object, "lm_temperature"))
 check("object place toggle removed", not hasattr(bpy.types.Object, "lm_place_enable"))
+
+# ---------------------------------------------------------------- blend/zip preset engine
+check("bpy.path mock", not hasattr(bpy, "path"))
+bpy.path = types.SimpleNamespace(abspath=lambda p: p)
+
+_lib_files = {}  # filepath -> list of collection names inside
+
+
+class _FakeLibLoad:
+    def __init__(self, filepath, link):
+        self.filepath = filepath
+        self.link = link
+        self.data_from = None
+        self.data_to = None
+
+    def __enter__(self):
+        names = list(_lib_files.get(self.filepath, []))
+        self.data_from = types.SimpleNamespace(collections=names)
+        self.data_to = types.SimpleNamespace(collections=[])
+        return self.data_from, self.data_to
+
+    def __exit__(self, *exc):
+        # "append": requested names become real collections
+        loaded = []
+        for name in self.data_to.collections:
+            if name not in self.data_from.collections:
+                continue
+            if name not in _coll_db:
+                _coll_db[name] = FakeColl(name)
+            loaded.append(name)
+        self.data_to.collections = loaded
+        return False
+
+
+bpy.data.libraries = types.SimpleNamespace(
+    load=lambda fp, link=False: _FakeLibLoad(fp, link))
+
+_safe_filename = ns["_safe_filename"]
+check("safe filename keeps spaces", _safe_filename("Kill Phil") == "Kill Phil")
+check("safe filename strips hostiles",
+      _safe_filename('a/b:c*?"<>|') == "a_b_c______")
+check("safe filename empty -> setup", _safe_filename("   ") == "setup")
+
+pk = tempfile.mkdtemp(prefix="lampochka_presets_")
+blend_a = os.path.join(pk, "Movie_lighting_setups.blend")
+blend_b = os.path.join(pk, "sub", "Still.blend")
+os.makedirs(os.path.dirname(blend_b))
+open(blend_a, "wb").close()
+open(blend_b, "wb").close()
+open(os.path.join(pk, "notes.txt"), "w").close()
+_lib_files[blend_a] = ["Collection 1", "Kill Phil", "Tyler Burden"]
+_lib_files[blend_b] = ["Acid"]
+
+_blend_collection_names = ns["_blend_collection_names"]
+check("blend collection names read",
+      _blend_collection_names(blend_a) == ["Collection 1", "Kill Phil",
+                                           "Tyler Burden"])
+check("blend collection names tolerate missing file",
+      _blend_collection_names(os.path.join(pk, "nope.blend")) == [])
+
+_scan = ns["_scan_presets_catalog"]
+catalog = _scan(pk)
+check("catalog scans recursively and skips non-blend",
+      [(e["blend"], e["collection"]) for e in catalog]
+      == [(blend_a, "Collection 1"), (blend_a, "Kill Phil"),
+          (blend_a, "Tyler Burden"), (blend_b, "Acid")])
+
+thumbs = os.path.join(pk, "thumbs")
+os.makedirs(thumbs)
+open(os.path.join(thumbs, "Kill Phil.png"), "wb").close()
+_preset_thumbnail = ns["_preset_thumbnail"]
+check("thumbnail by exact name (spaces)",
+      _preset_thumbnail(pk, "Kill Phil") == os.path.join(thumbs, "Kill Phil.png"))
+check("thumbnail missing -> None", _preset_thumbnail(pk, "Tyler Burden") is None)
+
+_enum_items = ns["preset_enum_items"]
+ns["_presets_pcoll"] = FakePColl()
+fake_settings = types.SimpleNamespace(preset_folder=pk)
+items = _enum_items(fake_settings, None)
+check("enum items built from catalog", len(items) == 4)
+check("enum item label is plain collection name",
+      items[1][1] == "Kill Phil")
+check("enum item description carries blend path",
+      all(it[2] in (blend_a, blend_b) for it in items))
+check("enum cache persists across calls",
+      _enum_items(fake_settings, None) == items)
+
+_sel = ns["_selected_setup"]
+fake_settings.selected_preset = items[1][0]
+sel = _sel(fake_settings)
+check("selected setup resolves by index",
+      sel is not None and sel["collection"] == "Kill Phil"
+      and sel["blend"] == blend_a)
+fake_settings.selected_preset = "zzz"
+check("selected setup rejects garbage", _sel(fake_settings) is None)
+fake_settings.selected_preset = "99"
+check("selected setup rejects out-of-range", _sel(fake_settings) is None)
+fake_settings.selected_preset = items[0][0]
+
+# zip install: PLS layout flatten + zip-slip guard
+_extract_package = ns["_extract_package"]
+pk_src = tempfile.mkdtemp(prefix="lampochka_zip_src_")
+zip_path = os.path.join(pk_src, "PLS_Movie.zip")
+import zipfile as _zip
+with _zip.ZipFile(zip_path, "w") as zf:
+    zf.writestr("library/Movie_lighting_setups.blend", b"BLENDA")
+    zf.writestr("library/thumbs/Kill Phil.png", b"THUMB")
+    zf.writestr("textures/Burnout.jpg", b"TEX")
+dest = os.path.join(pk, "PLS_Movie")
+_extract_package(zip_path, dest)
+check("package blend flattened from library/",
+      open(os.path.join(dest, "Movie_lighting_setups.blend"), "rb").read() == b"BLENDA")
+check("package thumbs flattened from library/thumbs",
+      os.path.isfile(os.path.join(dest, "thumbs", "Kill Phil.png")))
+check("package textures kept", os.path.isfile(os.path.join(dest, "textures", "Burnout.jpg")))
+check("library/ folder removed after flatten", not os.path.isdir(os.path.join(dest, "library")))
+
+evil_zip = os.path.join(pk_src, "evil.zip")
+with _zip.ZipFile(evil_zip, "w") as zf:
+    zf.writestr("../evil.txt", b"X")
+try:
+    _extract_package(evil_zip, os.path.join(pk, "evil"))
+    check("zip-slip entry rejected", False, "no exception")
+except ValueError:
+    check("zip-slip entry rejected", True)
+except Exception as ex:
+    check("zip-slip entry rejected", False, str(ex))
+
+installed_blend = os.path.join(dest, "Movie_lighting_setups.blend")
+_lib_files[installed_blend] = ["Collection 1", "Kill Phil"]
+check("catalog sees installed package",
+      any(e["blend"] == installed_blend for e in _scan(pk)))
+
+ns["_presets_cache_folder"] = None      # force rescan after the install
+items2 = _enum_items(fake_settings, None)
+check("duplicate names get file-tagged labels",
+      any(it[1].startswith("Collection 1 [") for it in items2))
+
+# _missing_preset_images
+_missing = ns["_missing_preset_images"]
+fake_img_ok = types.SimpleNamespace(source='FILE', packed_file=None, filepath="/nowhere")
+bpy.path.abspath = lambda p: p
+import os as _os
+_img_exists = _os.path.isfile
+_os.path.isfile = lambda p: False     # nothing exists on disk in this test
+node_ok = types.SimpleNamespace(type='TEX_IMAGE', image=fake_img_ok)
+node_other = types.SimpleNamespace(type='BSDF_EMISSION', image=None)
+fake_mat = types.SimpleNamespace(name="M", node_tree=types.SimpleNamespace(
+    nodes=[node_ok, node_other]))
+fake_ob = types.SimpleNamespace(material_slots=[types.SimpleNamespace(material=fake_mat)])
+missing = _missing([fake_ob])
+_os.path.isfile = _img_exists
+check("missing image reported", missing == ["nowhere"])
+fake_img2 = types.SimpleNamespace(source='GENERATED', packed_file=None, filepath="")
+node_ok.image = fake_img2
+check("generated image not reported", _missing([fake_ob]) == [])
+
+# save-side helpers: descendants walk
+_descendants = ns["_descendants"]
+root = FakeObj('EMPTY', name="rig")
+mid = FakeObj('LIGHT', name="key")
+leaf = FakeObj('EMPTY', name="sub")
+mid.parent = root
+leaf.parent = mid
+root.children = [mid]
+mid.children = [leaf]
+leaf.children = []
+check("descendants collects the subtree",
+      set(o.name for o in _descendants(root)) == {"key", "sub"})
+
+# installed package management (Preferences)
+pkgs = tempfile.mkdtemp(prefix="lampochka_pkgs_")
+for p in ("alpha", "beta", ".hidden"):
+    os.makedirs(os.path.join(pkgs, p))
+open(os.path.join(pkgs, "alpha", "a.blend"), "wb").close()
+open(os.path.join(pkgs, "alpha", "a.blend1"), "wb").close()
+open(os.path.join(pkgs, "beta", "b.txt"), "wb").close()
+
+_installed_packages = ns["_installed_packages"]
+listing = _installed_packages(pkgs)
+check("installed packages lists folders with blend counts",
+      listing == [("alpha", 1), ("beta", 0)], listing)
+
+fake_scene = types.SimpleNamespace(
+    lm_presets=types.SimpleNamespace(preset_folder=pkgs))
+fake_ctx = types.SimpleNamespace(scene=fake_scene)
+_live_base = ns["_live_preset_base"]
+check("live preset base = scene folder", _live_base(fake_ctx) == pkgs)
+fake_scene.lm_presets.preset_folder = ""
+prefs_stub = types.SimpleNamespace(presets_folder=pkgs)
+ns["get_lm_prefs"] = lambda ctx: prefs_stub
+check("live preset base falls back to prefs", _live_base(fake_ctx) == pkgs)
+
+RemoveOp = ns["LM_OT_preset_package_remove"]
+op = RemoveOp()
+op.report = lambda t, m: None
+op.package = "alpha"
+check("package remove poll true", RemoveOp.poll(fake_ctx))
+check("package remove finished", op.execute(fake_ctx) == {'FINISHED'})
+check("package remove deleted folder", not os.path.isdir(os.path.join(pkgs, "alpha")))
+check("package remove invalidated cache", ns["_presets_cache_folder"] is None)
+op.package = os.path.join("..", "evil")
+check("package remove rejects traversal",
+      op.execute(fake_ctx) == {'CANCELLED'})
+op.package = "nope"
+check("package remove rejects missing", op.execute(fake_ctx) == {'CANCELLED'})
+
+RemoveAll = ns["LM_OT_preset_package_remove_all"]
+check("remove-all poll true", RemoveAll.poll(fake_ctx))
+op_all = RemoveAll()
+op_all.report = lambda t, m: None
+check("remove-all finished", op_all.execute(fake_ctx) == {'FINISHED'})
+check("remove-all emptied the folder", _installed_packages(pkgs) == [])
+op_all2 = RemoveAll()
+op_all2.report = lambda t, m: None
+check("remove-all cancels when nothing left",
+      op_all2.execute(fake_ctx) == {'CANCELLED'})
+
+shutil.rmtree(pkgs, ignore_errors=True)
+
+# preset carousel: switching applies via the enum update
+_apply_calls = []
+_orig_apply = ns["_apply_setup_collection"]
+ns["_apply_setup_collection"] = lambda ctx, rep: _apply_calls.append(1)
+
+# light slots mirror (fixed-height list)
+class FakeSlot:
+    def __init__(self):
+        self.name = ""
+
+
+class FakeSlots:
+    def __init__(self):
+        self.items = []
+
+    def clear(self):
+        self.items = []
+
+    def add(self):
+        s = FakeSlot()
+        self.items.append(s)
+        return s
+
+    def __iter__(self):
+        return iter(list(self.items))
+
+    def __len__(self):
+        return len(self.items)
+
+
+_sync_slots = ns["_sync_light_slots"]
+mirror = FakeSlots()
+mirror.items = [FakeSlot(), FakeSlot()]
+mirror.items[0].name = "Key"
+mirror.items[1].name = "Rim"
+fake_settings_mirror = types.SimpleNamespace(lights_slots=mirror)
+keep = list(mirror.items)
+same = _sync_slots(fake_settings_mirror,
+                   [types.SimpleNamespace(name="Key"),
+                    types.SimpleNamespace(name="Rim")])
+check("slots sync: no rewrite when equal",
+      same is False and mirror.items == keep)
+changed = _sync_slots(fake_settings_mirror,
+                      [types.SimpleNamespace(name="Key"),
+                       types.SimpleNamespace(name="Rim"),
+                       types.SimpleNamespace(name="Fill")])
+check("slots sync: rebuild on change", changed
+      and [s.name for s in mirror.items] == ["Key", "Rim", "Fill"])
+changed = _sync_slots(fake_settings_mirror,
+                      [types.SimpleNamespace(name="Fill")])
+check("slots sync: rebuild on delete", changed
+      and [s.name for s in mirror.items] == ["Fill"])
+
+# UIList filter_items: bitflag set = SHOWN, 0 = hidden
+class FakeUL:
+    bitflag_filter_item = 1
+
+
+mirror.items = [FakeSlot(), FakeSlot(), FakeSlot()]
+mirror.items[0].name = "Key Light"
+mirror.items[1].name = "Rim Light"
+mirror.items[2].name = "Sun"
+FI = ns["LM_UL_Lights"].filter_items
+fake_settings_mirror.filter_name = ""
+flt, order = FI(FakeUL(), None, fake_settings_mirror, "lights_slots")
+check("list filter: empty filter shows all",
+      flt == [1, 1, 1] and order == [])
+fake_settings_mirror.filter_name = "light"
+flt, order = FI(FakeUL(), None, fake_settings_mirror, "lights_slots")
+check("list filter: substring hides non-matching",
+      flt == [1, 1, 0])
+fake_settings_mirror.filter_name = "SUN"
+flt, _ = FI(FakeUL(), None, fake_settings_mirror, "lights_slots")
+check("list filter: case-insensitive", flt == [0, 0, 1])
+fake_settings_mirror.filter_name = ""
+
+catalog = [{"blend": "a.blend", "collection": "S0"},
+           {"blend": "a.blend", "collection": "S1"},
+           {"blend": "a.blend", "collection": "S2"}]
+ns["_presets_catalog"] = catalog
+ns["_presets_enum_cache"] = [("0", "S0", "a.blend", 'FILE', 0),
+                             ("1", "S1", "a.blend", 'FILE', 1),
+                             ("2", "S2", "a.blend", 'FILE', 2)]
+carousel_scene = types.SimpleNamespace(
+    lm_presets=types.SimpleNamespace(selected_preset="1"))
+car_ctx = types.SimpleNamespace(scene=carousel_scene)
+ns["update_preset_selected"](None, car_ctx)
+check("enum update applies selection", len(_apply_calls) == 1)
+
+
+def cycle_mock(ctx, step):
+    # SimpleNamespace doesn't fire the update callback — Blender does
+    res = ns["_preset_cycle"](ctx, step)
+    ns["update_preset_selected"](None, ctx)
+    return res
+
+
+check("next applies instantly",
+      cycle_mock(car_ctx, 1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "2"
+      and len(_apply_calls) == 2)
+check("next wraps around",
+      cycle_mock(car_ctx, 1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "0"
+      and len(_apply_calls) == 3)
+check("prev wraps backwards",
+      cycle_mock(car_ctx, -1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "2"
+      and len(_apply_calls) == 4)
+carousel_scene.lm_presets.selected_preset = "zzz"
+check("cycle from unknown selection: next -> first",
+      cycle_mock(car_ctx, 1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "0"
+      and len(_apply_calls) == 5)
+carousel_scene.lm_presets.selected_preset = ""
+check("cycle from empty selection: prev -> last",
+      cycle_mock(car_ctx, -1) == {'FINISHED'}
+      and carousel_scene.lm_presets.selected_preset == "2"
+      and len(_apply_calls) == 6)
+
+ns["_presets_catalog"] = []
+check("cycle cancels with empty catalog",
+      ns["_preset_cycle"](car_ctx, 1) == {'CANCELLED'})
+
+ns["_presets_catalog"] = catalog
+Card = ns["LM_OT_preset_card"]
+card = Card()
+card.index = 0
+carousel_scene.lm_presets.selected_preset = "2"
+card.execute(car_ctx)
+ns["update_preset_selected"](None, car_ctx)
+check("card applies by index",
+      carousel_scene.lm_presets.selected_preset == "0"
+      and len(_apply_calls) == 7)
+
+ns["_apply_setup_collection"] = _orig_apply
+ns["_presets_catalog"] = []
+ns["_presets_enum_cache"] = []
+
+shutil.rmtree(pk, ignore_errors=True)
+shutil.rmtree(pk_src, ignore_errors=True)
 
 shutil.rmtree(tmp, ignore_errors=True)
 
