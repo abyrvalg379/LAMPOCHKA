@@ -316,6 +316,57 @@ try:
     back = {ob.name for ob in presets_coll.all_objects}
     check("carousel returned to Kill Phil", back == before, (before, back))
 
+    # -- solo light ----------------------------------------------------------
+    for nm, tp in (("SoloA", 'POINT'), ("SoloB", 'POINT'), ("SoloC", 'POINT')):
+        lt = bpy.data.lights.new(nm + "_d", tp)
+        ob = bpy.data.objects.new(nm, lt)
+        scene.collection.objects.link(ob)
+    bpy.ops.light_manager.solo_light(light_name="SoloA")
+    def _sv(n):
+        return bpy.data.objects[n].hide_viewport
+    check("solo isolates A", not _sv("SoloA") and _sv("SoloB") and _sv("SoloC"))
+    bpy.ops.light_manager.solo_light(light_name="SoloB")
+    check("solo moves to B", _sv("SoloA") and not _sv("SoloB") and _sv("SoloC"))
+    bpy.ops.light_manager.solo_light(light_name="SoloB")
+    check("solo off restores", not _sv("SoloA") and not _sv("SoloB")
+          and not _sv("SoloC"))
+    for nm in ("SoloA", "SoloB", "SoloC"):
+        bpy.data.objects.remove(bpy.data.objects[nm], do_unlink=True)
+
+    # -- cycle select ---------------------------------------------------------
+    lights_now = [o for o in scene.objects if o.type == 'LIGHT']
+    first = lights_now[0]
+    bpy.context.view_layer.objects.active = first
+    bpy.ops.light_manager.cycle_select(direction=1)
+    check("cycle selects another light",
+          bpy.context.active_object is not None
+          and bpy.context.active_object.type == 'LIGHT'
+          and bpy.context.active_object is not first)
+    nxt = bpy.context.active_object
+    bpy.ops.light_manager.cycle_select(direction=-1)
+    check("cycle returns back", bpy.context.active_object is first)
+
+    # -- preset flip: mirror across root X, twice = original ------------------
+    presets_coll = bpy.data.collections.get("Presets")
+    probe = next(ob for ob in presets_coll.all_objects if ob.type == 'LIGHT')
+    root = probe.parent
+    bpy.context.view_layer.update()
+    before = tuple(round(v, 5) for v in probe.matrix_world.translation)
+    rx = root.matrix_world.translation.x
+    res = bpy.ops.light_manager.preset_flip(direction='X')
+    check("flip X finished", res == {'FINISHED'})
+    bpy.context.view_layer.update()
+    after = tuple(round(v, 5) for v in probe.matrix_world.translation)
+    check("flip X mirrors x around root, keeps y/z",
+          abs(after[0] - (2 * rx - before[0])) < 1e-4
+          and abs(after[1] - before[1]) < 1e-4
+          and abs(after[2] - before[2]) < 1e-4,
+          (before, after, rx))
+    bpy.ops.light_manager.preset_flip(direction='X')
+    bpy.context.view_layer.update()
+    back = tuple(round(v, 5) for v in probe.matrix_world.translation)
+    check("double flip restores", back == before, (before, back))
+
     # -- package removal (Preferences operators) ---------------------------
     check("packages visible before removal",
           (os.path.isdir(os.path.join(lib, "mini_package")))
