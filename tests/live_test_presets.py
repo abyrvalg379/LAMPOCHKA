@@ -367,6 +367,29 @@ try:
     back = tuple(round(v, 5) for v in probe.matrix_world.translation)
     check("double flip restores", back == before, (before, back))
 
+    # -- add-on-surface aiming helper ---------------------------------------
+    from mathutils import Vector as _V
+    ltS = bpy.data.lights.new("AimSpot_d", 'SPOT')
+    obS = bpy.data.objects.new("AimSpot", ltS)
+    scene.collection.objects.link(obS)
+    m._aim_light(obS, (1.0, 2.0, 3.0), _V((0.0, 0.0, 1.0)))
+    bpy.context.view_layer.update()
+    down = obS.matrix_world.to_3x3() @ _V((0.0, 0.0, -1.0))
+    check("aim: up-normal light points down",
+          (down - _V((0.0, 0.0, -1.0))).length < 1e-5, tuple(down))
+    m._aim_light(obS, (1.0, 2.0, 3.0), _V((1.0, 0.0, 0.0)))
+    bpy.context.view_layer.update()
+    side = obS.matrix_world.to_3x3() @ _V((0.0, 0.0, -1.0))
+    check("aim: side-normal light points -X",
+          (side - _V((-1.0, 0.0, 0.0))).length < 1e-5, tuple(side))
+    check("aim: position set",
+          (obS.location - _V((1.0, 2.0, 3.0))).length < 1e-5)
+    # defaults per type
+    check("surface defaults cover all types",
+          set(m._SURFACE_LIGHT_DEFAULTS) == {'POINT', 'SUN', 'SPOT', 'AREA'})
+    check("surface operator registered",
+          hasattr(m, "LM_OT_add_surface_light"))
+
     # -- package removal (Preferences operators) ---------------------------
     check("packages visible before removal",
           (os.path.isdir(os.path.join(lib, "mini_package")))

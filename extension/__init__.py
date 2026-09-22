@@ -3002,6 +3002,7 @@ class LM_PT_MainPanel(bpy.types.Panel):
         row.operator("light_manager.toggle_all_render", text="", icon='RESTRICT_RENDER_OFF')
         row.separator()
         row.operator_menu_enum("light_manager.add_light", "light_type", text="", icon='ADD')
+        row.operator_menu_enum("light_manager.add_surface_light", "light_type", text="", icon='FACESEL')
 
         # --- Light list: fixed height, internal scroll. The mirror lives
         # in settings.lights_slots and is synced by the depsgraph handler
@@ -3380,6 +3381,140 @@ class LM_OT_cycle_select(bpy.types.Operator):
             idx = settings.selected_index
         new = (idx + self.direction) % len(lights)
         return bpy.ops.light_manager.select_light('EXEC_DEFAULT', index=new)
+
+
+def _aim_light(ob, location, normal):
+    """Place a light at a surface point aimed along the surface normal
+    (lights emit down their local -Z axis)."""
+    ob.location = location
+    direction = normal * -1.0
+    ob.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+
+
+_SURFACE_LIGHT_DEFAULTS = {
+    'POINT': {"energy": 100.0},
+    'SUN': {"energy": 1.0},
+    'SPOT': {"energy": 100.0, "spot_size": 0.785398},   # 45 deg
+    'AREA': {"energy": 100.0, "size": 1.0},
+}
+
+
+class LM_OT_add_surface_light(bpy.types.Operator):
+    """Add a light on the surface under the cursor: the light follows the
+    mouse across surfaces, aimed along the normals. LMB/Enter places it,
+    RMB/Esc cancels."""
+    bl_idname = "light_manager.add_surface_light"
+    bl_label = "Add Light on Surface"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    light_type: EnumProperty(
+        name="Type",
+        items=[
+            ('POINT', "Point", "Point light"),
+            ('SUN', "Sun", "Sun light"),
+            ('SPOT', "Spot", "Spot light"),
+            ('AREA', "Area", "Area light"),
+        ],
+        default='AREA',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.area is not None and context.area.type == 'VIEW_3D'
+
+    def _cleanup(self, context):
+        try:
+            context.window.cursor_modal_restore()
+            context.area.header_text_set(None)
+        except Exception:
+            pass
+
+    def execute(self, context):
+        data = bpy.data.lights.new(name=self.light_type + "_Light",
+                                   type=self.light_type)
+        for attr, value in _SURFACE_LIGHT_DEFAULTS.get(
+                self.light_type, {}).items():
+            try:
+                setattr(data, attr, value)
+            except Exception:
+                pass
+        obj = bpy.data.objects.new(name=data.name, object_data=data)
+        context.collection.objects.link(obj)
+        bpy.ops.object.select_all(action='DESELECT')
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        self.report({'INFO'}, "Added %s on surface" % self.light_type)
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        if context.region is None or context.region_data is None:
+            self.report({'WARNING'}, "Add on Surface needs a 3D viewport")
+            return {'CANCELLED'}
+        self._ob = None
+        self._cancelled = False
+        try:
+            context.window.cursor_modal_set('CROSSHAIR')
+            context.area.header_text_set(
+                "Add %s on surface: LMB/Enter — place, RMB/Esc — cancel"
+                % self.light_type)
+        except Exception:
+            pass
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def modal(self, context, event):
+        if event.type in {'MOUSEMOVE', 'INBETWEEN_MOUSEMOVE'}:
+            hit = _viewport_ray(context, (event.mouse_region_x,
+                                          event.mouse_region_y))
+            if hit is not None:
+                location, normal, _ob = hit
+                if self._ob is None:
+                    data = bpy.data.lights.new(
+                        name=self.light_type + "_Light",
+                        type=self.light_type)
+                    for attr, value in _SURFACE_LIGHT_DEFAULTS.get(
+                            self.light_type, {}).items():
+                        try:
+                            setattr(data, attr, value)
+                        except Exception:
+                            pass
+                    self._ob = bpy.data.objects.new(
+                        name=data.name, object_data=data)
+                    context.collection.objects.link(self._ob)
+                    context.view_layer.objects.active = self._ob
+                offset = 0.0 if self.light_type == 'SUN' else 0.05
+                _aim_light(self._ob,
+                           location + normal * offset,
+                           normal)
+            return {'RUNNING_MODAL'}
+
+        if (event.type in {'LEFTMOUSE', 'RET', 'NUMPAD_ENTER'}
+                and event.value == 'PRESS'):
+            self._cleanup(context)
+            if self._ob is None:
+                # never touched a surface — add at the cursor-free default
+                bpy.ops.light_manager.add_light(
+                    'EXEC_DEFAULT', light_type=self.light_type)
+            else:
+                bpy.ops.object.select_all(action='DESELECT')
+                self._ob.select_set(True)
+                context.view_layer.objects.active = self._ob
+            self.report({'INFO'}, "Added %s on surface" % self.light_type)
+            return {'FINISHED'}
+
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            self._cleanup(context)
+            if self._ob is not None:
+                bpy.data.objects.remove(self._ob, do_unlink=True)
+                self._ob = None
+            self._cancelled = True
+            return {'CANCELLED'}
+
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE',
+                          'WHEELINMOUSE', 'WHEELOUTMOUSE'}:
+            return {'PASS_THROUGH'}
+
+        return {'RUNNING_MODAL'}
 
 
 class LM_OT_toggle_visibility(bpy.types.Operator):
@@ -3950,6 +4085,7 @@ classes = (
     LM_OT_toggle_all_visibility,
     LM_OT_toggle_all_render,
     LM_OT_add_light,
+    LM_OT_add_surface_light,
     LM_OT_delete_light,
     LM_OT_delete_light_row,
     LM_OT_duplicate_light,
