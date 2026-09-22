@@ -2238,6 +2238,48 @@ class LM_OT_preset_package_remove_all(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LM_OT_preset_flip(bpy.types.Operator):
+    """Mirror the applied preset rig across the root's X or Y axis."""
+    bl_idname = "light_manager.preset_flip"
+    bl_label = "Flip Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: EnumProperty(
+        name="Axis",
+        items=[('X', "X", "Mirror across the X axis"),
+               ('Y', "Y", "Mirror across the Y axis")],
+        default='X',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+        return (coll is not None
+                and any(getattr(ob, "parent", None) is None
+                        for ob in coll.objects))
+
+    def execute(self, context):
+        coll = bpy.data.collections.get(PRESET_COLLECTION_NAME)
+        roots = [ob for ob in coll.objects
+                 if getattr(ob, "parent", None) is None]
+        if not roots:
+            self.report({'WARNING'}, "No applied preset to flip")
+            return {'CANCELLED'}
+        context.view_layer.update()
+        pivot = roots[0].matrix_world.translation.copy()
+        sx = -1.0 if self.direction == 'X' else 1.0
+        sy = -1.0 if self.direction == 'Y' else 1.0
+        mirror = (Matrix.Translation(pivot)
+                  @ Matrix.Diagonal(Vector((sx, sy, 1.0, 1.0)))
+                  @ Matrix.Translation(-pivot))
+        for ob in roots:
+            ob.matrix_world = mirror @ ob.matrix_world
+        context.view_layer.update()
+        # the stored rotation angle stays valid: a mirror maps Z angles to
+        # their negation, keep the prop in sync with reality
+        return {'FINISHED'}
+
+
 class LM_OT_preset_favorite(bpy.types.Operator):
     """Toggle the current setup as a favorite (heart icon)."""
     bl_idname = "light_manager.preset_favorite"
@@ -2396,6 +2438,9 @@ class LM_PT_PresetsPanel(bpy.types.Panel):
 
         layout.prop(presets, "preset_intensity", slider=True)
         layout.prop(presets, "preset_rotation_z")
+        row = layout.row(align=True)
+        row.operator("light_manager.preset_flip", text="Flip X").direction = 'X'
+        row.operator("light_manager.preset_flip", text="Flip Y").direction = 'Y'
 
         col = layout.column(align=True)
         col.prop(presets, "preset_name", text="")
@@ -2903,6 +2948,12 @@ class LM_UL_Lights(bpy.types.UIList):
                           depress=bool(getattr(obj, "lm_place_enable", False)))
         op.light_name = obj.name
 
+        # Solo: isolate this light
+        op = row.operator("light_manager.solo_light", text="",
+                          icon='SOLO_ON',
+                          depress=bool(obj.get("lm_solo_active")))
+        op.light_name = obj.name
+
         # Visibility icons (operators)
         op = row.operator("light_manager.toggle_visibility", text="",
                           icon='HIDE_OFF' if not obj.hide_viewport else 'HIDE_ON')
@@ -2942,6 +2993,10 @@ class LM_PT_MainPanel(bpy.types.Panel):
         # --- Header ---
         row = layout.row(align=True)
         row.prop(settings, "filter_name", text="", icon='VIEWZOOM')
+        row.operator("light_manager.cycle_select", text="",
+                     icon='TRIA_LEFT').direction = -1
+        row.operator("light_manager.cycle_select", text="",
+                     icon='TRIA_RIGHT').direction = 1
         row.separator()
         row.operator("light_manager.toggle_all_visibility", text="", icon='HIDE_OFF')
         row.operator("light_manager.toggle_all_render", text="", icon='RESTRICT_RENDER_OFF')
@@ -3245,6 +3300,86 @@ class LM_OT_select_light(bpy.types.Operator):
             else:
                 settings.settings_light = ""
         return {'FINISHED'}
+
+
+class LM_OT_solo_light(bpy.types.Operator):
+    """Solo this light: every other light is hidden (viewport + render)
+    until toggled off. Toggling another light moves the solo there."""
+    bl_idname = "light_manager.solo_light"
+    bl_label = "Solo Light"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    light_name: StringProperty()
+
+    @staticmethod
+    def _restore(context):
+        lights = get_scene_lights(context)
+        for ob in lights:
+            if ob.get("lm_solo_active"):
+                for other in lights:
+                    if other is ob:
+                        continue
+                    for key, attr in (("lm_solo_v", "hide_viewport"),
+                                      ("lm_solo_r", "hide_render")):
+                        value = other.get(key)
+                        if value is not None:
+                            setattr(other, attr, value)
+                            try:
+                                del other[key]
+                            except KeyError:
+                                pass
+                try:
+                    del ob["lm_solo_active"]
+                except KeyError:
+                    pass
+
+    def execute(self, context):
+        lights = get_scene_lights(context)
+        target = bpy.data.objects.get(self.light_name)
+        if target is None or target not in lights:
+            self.report({'ERROR'}, "No such light: " + self.light_name)
+            return {'CANCELLED'}
+        was_solo = bool(target.get("lm_solo_active"))
+        self._restore(context)
+        if not was_solo:
+            for ob in lights:
+                if ob is target:
+                    continue
+                ob["lm_solo_v"] = ob.hide_viewport
+                ob["lm_solo_r"] = ob.hide_render
+                ob.hide_viewport = True
+                ob.hide_render = True
+            target["lm_solo_active"] = 1
+            self.report({'INFO'}, "Solo: " + target.name)
+        else:
+            self.report({'INFO'}, "Solo off")
+        return {'FINISHED'}
+
+
+class LM_OT_cycle_select(bpy.types.Operator):
+    """Select the next / previous light in the scene."""
+    bl_idname = "light_manager.cycle_select"
+    bl_label = "Cycle Light"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    direction: IntProperty(default=1)
+
+    @classmethod
+    def poll(cls, context):
+        return len(get_scene_lights(context)) > 1
+
+    def execute(self, context):
+        lights = get_scene_lights(context)
+        if not lights:
+            return {'CANCELLED'}
+        settings = context.scene.lm_settings
+        active = context.active_object
+        try:
+            idx = lights.index(active)
+        except ValueError:
+            idx = settings.selected_index
+        new = (idx + self.direction) % len(lights)
+        return bpy.ops.light_manager.select_light('EXEC_DEFAULT', index=new)
 
 
 class LM_OT_toggle_visibility(bpy.types.Operator):
@@ -3808,6 +3943,8 @@ classes = (
     LM_PresetSettings,
     LM_AddonPreferences,
     LM_OT_select_light,
+    LM_OT_solo_light,
+    LM_OT_cycle_select,
     LM_OT_toggle_visibility,
     LM_OT_toggle_render,
     LM_OT_toggle_all_visibility,
@@ -3839,6 +3976,7 @@ classes = (
     LM_OT_preset_prev,
     LM_OT_preset_next,
     LM_OT_preset_favorite,
+    LM_OT_preset_flip,
     LM_OT_preset_install_zip,
     LM_OT_preset_package_remove,
     LM_OT_preset_package_remove_all,

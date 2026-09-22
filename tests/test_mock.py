@@ -1894,6 +1894,83 @@ check("card applies by index",
       carousel_scene.lm_presets.selected_preset == "0"
       and len(_apply_calls) == 7)
 
+_orig_get_lights = ns["get_scene_lights"]
+
+# solo light: isolate one, restore on off / move
+class FakeSceneObjects:
+    def __init__(self, objs):
+        self.objs = objs
+
+    def __iter__(self):
+        return iter(list(self.objs))
+
+    def get(self, name):
+        return next((o for o in self.objs if o.name == name), None)
+
+
+class FakeHideState:
+    def __init__(self):
+        self.view = []
+        self.render = []
+        self.removed = []
+
+
+class SoloState:
+    pass
+
+
+_solo_state = SoloState()
+_solo_state.hide_viewport_logs = FakeHideState()
+_solo_state.hide_render_logs = FakeHideState()
+
+
+def _solo_fixture():
+    a = FakeObj('LIGHT', name="SoloA")
+    b = FakeObj('LIGHT', name="SoloB")
+    c = FakeObj('LIGHT', name="SoloC")
+    for ob in (a, b, c):
+        ob.hide_viewport = False
+        ob.hide_render = False
+    scene = types.SimpleNamespace(objects=FakeSceneObjects([a, b, c]))
+    ctx = types.SimpleNamespace(scene=scene, active_object=a)
+    bpy.data.objects = types.SimpleNamespace(
+        get=lambda n: next((o for o in (a, b, c) if o.name == n), None))
+    return a, b, c, ctx
+
+
+SoloOp = ns["LM_OT_solo_light"]
+a, b, c, solo_ctx = _solo_fixture()
+op = SoloOp()
+op.report = lambda t, m: None
+op.light_name = "SoloA"
+check("solo toggle on", op.execute(solo_ctx) == {'FINISHED'})
+check("solo on hides others",
+      a.hide_viewport is False and b.hide_viewport is True
+      and c.hide_viewport is True)
+check("solo on hides render too",
+      b.hide_render is True and c.hide_render is True)
+check("solo marks active", bool(a.get("lm_solo_active")))
+check("solo stores backups", b.get("lm_solo_v") is False
+      and b.get("lm_solo_r") is False)
+op.light_name = "SoloB"
+op.execute(solo_ctx)
+check("solo moves to another light",
+      a.hide_viewport is True and b.hide_viewport is False
+      and c.hide_viewport is True and bool(b.get("lm_solo_active"))
+      and not a.get("lm_solo_active"))
+op.light_name = "SoloB"
+op.execute(solo_ctx)
+check("solo off restores everything",
+      a.hide_viewport is False and b.hide_viewport is False
+      and c.hide_viewport is False
+      and c.hide_render is False
+      and b.get("lm_solo_v") is None and b.get("lm_solo_r") is None
+      and not b.get("lm_solo_active"))
+op.light_name = "Ghost"
+check("solo rejects missing light", op.execute(solo_ctx) == {'CANCELLED'})
+
+# cycle select — реюз select_light, проверяется live-тестом
+
 # favorites: keys, toggle, carousel filtering
 check("favorite key format",
       ns["_favorite_key"]({"blend": "x/y/Pack.blend", "collection": "Kill Phil"})

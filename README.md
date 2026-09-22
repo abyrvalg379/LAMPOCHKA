@@ -95,6 +95,9 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - Pick a presets folder — every collection of every `.blend` in the folder (recursive) appears as a setup in the grid; optional previews from `thumbs/<name>.png` or `thumbnails/<name>.png` beside the package
 - **Save Setup** — writes the scene's lights (with their parent empties and rig subtrees) as a `.blend` setup into the presets folder. Use meaningful names for your lights (Key, Rim, Fill) — the setup reads as a lighting scheme
 - **Carousel browsing** — one row of preview cards (previous / active / next) with ◀ ▶ arrows, like the HDRI browser; **switching presets applies them immediately**, no separate Apply click. Clicking a neighbouring card jumps to it; the catalog wraps around
+- **Solo Light** — the SOLO button on each light row isolates it: every other light is hidden (viewport + render) until toggled off or moved to another light
+- **Cycle Select** — ◀ ▶ in the list header walk through the scene lights without touching the list
+- **Flip Preset** — Flip X / Flip Y mirror the applied preset rig across the root's axes (double flip restores)
 - **Master Intensity** — one slider scales every applied preset light against its authored energies (no compounding on re-applies)
 - **Pivot Rotation Z** — rotate the applied preset around its parent empty on the world Z axis; returning the slider to zero restores the authored orientation
 - **Favorites** — mark setups with the ♥ next to the setup name; the heart toggle in the panel header switches the carousel between all setups and favorites only (stored in preferences, survives library moves)
