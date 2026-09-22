@@ -4,7 +4,7 @@
 
 *Документация на русском: [README.ru.md](README.ru.md)*
 
-Blender addon for managing all lights in the scene from a single panel — plus an HDRI environment browser.
+Blender addon for managing all lights in the scene from a single panel — plus HDRI / IES / Gobo browsers, lighting setup presets, a sun helper and interactive placement.
 
 **Blender 4.2+ · Author: Maksim Kovalev**
 
@@ -16,9 +16,13 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 
 ### Light List
 - All scene lights displayed with type icons (Point / Sun / Spot / Area)
+- Fixed-height scrollable list (8 rows) — the panel size stays stable no matter how the light count changes
 - Filter by name
 - Click to select in viewport
 - Gear icon (⚙) opens inline settings
+- **Solo Light** — the SOLO button on each row isolates the light: every other light is hidden (viewport + render) until toggled off or moved to another light
+- **Cycle Select** — ◀ ▶ in the header walk through the scene lights without scrolling the list
+- **Batch mode** — the checkbox in the header switches to group editing: click names to collect a group, then scale all their powers with one slider, Show/Hide them together, or release the group
 
 ### Visibility Controls
 - 👁 — toggle viewport visibility per light
@@ -41,6 +45,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 
 ### Light Management
 - Add light (Point / Sun / Spot / Area) from header menu
+- **Add Light on Surface** — the FACESEL menu next to Add: the light is created under the cursor and slides across scene surfaces, aimed along the surface normals (LMB/Enter places it, RMB/Esc cancels)
 - Duplicate / Delete buttons in settings
 - Move up / down in list
 
@@ -92,12 +97,9 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 ### Light Setup Presets
 - Collapsible **Presets** sub-panel: light setups live as `.blend` packages, applied by appending the setup collection — empty hierarchies, light node trees and world transforms arrive exactly as authored
 - **Install from Zip** — install one or more preset packages from `.zip` archives; each zip becomes a sub-folder of your presets folder. PLS-compatible layout (`library/*.blend` + `library/thumbs/`) is flattened automatically
-- Pick a presets folder — every collection of every `.blend` in the folder (recursive) appears as a setup in the grid; optional previews from `thumbs/<name>.png` or `thumbnails/<name>.png` beside the package
+- Pick a presets folder — every collection of every `.blend` in the folder (recursive) appears as a setup in the carousel; optional previews from `thumbs/<name>.png` or `thumbnails/<name>.png` beside the package
 - **Save Setup** — writes the scene's lights (with their parent empties and rig subtrees) as a `.blend` setup into the presets folder. Use meaningful names for your lights (Key, Rim, Fill) — the setup reads as a lighting scheme
 - **Carousel browsing** — one row of preview cards (previous / active / next) with ◀ ▶ arrows, like the HDRI browser; **switching presets applies them immediately**, no separate Apply click. Clicking a neighbouring card jumps to it; the catalog wraps around
-- **Add Light on Surface** — the FACESEL button next to Add opens a menu of Point/Sun/Spot/Area: the light is created under the cursor and slides across surfaces aimed along the normals (LMB/Enter places it, RMB/Esc cancels)
-- **Solo Light** — the SOLO button on each light row isolates it: every other light is hidden (viewport + render) until toggled off or moved to another light
-- **Cycle Select** — ◀ ▶ in the list header walk through the scene lights without touching the list
 - **Flip Preset** — Flip X / Flip Y mirror the applied preset rig across the root's axes (double flip restores)
 - **Master Intensity** — one slider scales every applied preset light against its authored energies (no compounding on re-applies)
 - **Pivot Rotation Z** — rotate the applied preset around its parent empty on the world Z axis; returning the slider to zero restores the authored orientation
@@ -118,7 +120,7 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 - The button state is reset when a file loads, so the mode is never active unexpectedly
 
 ### Light & Shadow Linking (v3)
-- **Light Linking: Pick** / **Shadow Linking: Pick** in the light's ⚙ settings (Blender 4.x)
+- **Light Linking: Pick** / **Shadow Linking: Pick** in the light's ⚙ settings (Blender 4.x / 5.x)
 - Click objects in the viewport to link/unlink them as receivers or blockers of the light — faster than digging through outliner collections
 - Enter confirms, Esc / Right click rolls back to the state before the picking session
 - Clear Receivers / Clear Blockers buttons wipe the link assignments
@@ -153,13 +155,13 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 
 ```
 LAMPOCHKA/
-├── out/                       ← distributives per version (out/v3.0.0/)
+├── out/                       ← distributives per version (out/v3.4.7/)
 └── work/                      ← sources (git repo)
     ├── extension/             ← Blender 4.2+ (manifest, no bl_info)
     │   ├── __init__.py
     │   └── blender_manifest.toml
     ├── screen/                ← cover & panel screenshots
-    ├── tests/test_mock.py     ← mock test suite, runs without Blender
+    ├── tests/                 ← mock suite + live headless tests
     └── ROADMAP.md             ← development history & plans
 ```
 
@@ -173,7 +175,7 @@ GPL-3.0-or-later — see [LICENSE](LICENSE). © Maksim Kovalev
 
 ## Credits
 
-- Inspired by the **Lumio** add-on (The Blenderender) — HDRI browser concept
+- Inspired by the **Lumio** add-on — HDRI browser concept
 - Solar position — public-domain NOAA algorithm
 
 ## Author
