@@ -63,7 +63,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 - **Prev / Next arrows (v2.4)** — flip through the folder and apply each HDRI instantly, no need to hit Apply every time
 - **Apply HDRI** — builds the world node setup (TexCoord → Mapping → Environment → Background) in one click
 - If the world already has an environment setup, only the image is swapped — existing nodes are not destroyed
-- **Hide from Camera (v2.4)** — show a flat color to the camera instead of the HDRI (black by default) while lighting and reflections keep the HDRI; classic VFX trick for rendering on a clean plate
+- **Hide from Camera (v2.4)** — show a flat color to the camera instead of the HDRI (black by default) while lighting and reflections keep the HDRI; handy for rendering on a clean plate with real lighting
 - **Clear HDRI** — removes the HDRI node chain and leaves a pitch-black Background with zero strength (no environment light); rotation resets and the panel strength returns to its default 1, so the next HDRI applies at full power
 - **Rotation** — rotate the environment (Z for turntable-style spin, X/Y for tilt)
 - **Strength** — environment intensity, live update
