@@ -6,264 +6,48 @@ r"""LAMPOCHKA - Руководство пользователя (RU). Генер
 Выход:   D:\AI\ZCode\Project\LAMPOCHKA\work\docs\LAMPOCHKA_Manual_RU.docx
 """
 
-from docx import Document
-from docx.shared import Pt, RGBColor, Cm, Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_ALIGN_VERTICAL
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
+import json
 
-OUT = r'D:\AI\ZCode\Project\LAMPOCHKA\work\docs\LAMPOCHKA_Manual_RU.docx'
+import _docstyle as ds
 
-doc = Document()
-
-for section in doc.sections:
-    section.top_margin    = Inches(0.9)
-    section.bottom_margin = Inches(0.9)
-    section.left_margin   = Inches(1)
-    section.right_margin  = Inches(1)
-
-# ── базовые стили ──────────────────────────────────────────────────────────
-
-normal = doc.styles['Normal']
-normal.font.name = 'Arial'
-normal.font.size = Pt(10)
-normal.paragraph_format.line_spacing = 1.3
-normal.paragraph_format.space_after = Pt(4)
-normal.paragraph_format.space_before = Pt(0)
-rpr = normal.element.get_or_add_rPr()
-rfonts = rpr.find(qn('w:rFonts'))
-rfonts.set(qn('w:cs'), 'Arial')
-
-for lvl, size in (('Heading 1', 15), ('Heading 2', 12.5), ('Heading 3', 11)):
-    st = doc.styles[lvl]
-    st.font.name = 'Arial'
-    st.font.size = Pt(size)
-    st.font.bold = True
-    st.font.color.rgb = RGBColor(0x1F, 0x49, 0x7D) if lvl == 'Heading 1' else RGBColor(0x2E, 0x74, 0xB5)
-    st.paragraph_format.space_before = Pt(14 if lvl == 'Heading 1' else 10)
-    st.paragraph_format.space_after = Pt(5)
-    st.paragraph_format.line_spacing = 1.15
-    st.paragraph_format.keep_with_next = True
-
-# ── хелперы ────────────────────────────────────────────────────────────────
-
-HDR_BG  = '2E75B5'
-ALT_ROW = 'F5F8FB'
-BLUE_H1 = RGBColor(0x1F, 0x49, 0x7D)
-GREY    = RGBColor(0x55, 0x55, 0x55)
-
-
-def set_cell_bg(cell, hex_color):
-    tc = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    shd = OxmlElement('w:shd')
-    shd.set(qn('w:val'), 'clear')
-    shd.set(qn('w:color'), 'auto')
-    shd.set(qn('w:fill'), hex_color)
-    tcPr.append(shd)
-
-
-def set_cell_borders(cell, color='CCCCCC'):
-    tc = cell._tc
-    tcPr = tc.get_or_add_tcPr()
-    tcB = OxmlElement('w:tcBorders')
-    for side in ('top', 'left', 'bottom', 'right'):
-        b = OxmlElement(f'w:{side}')
-        b.set(qn('w:val'), 'single')
-        b.set(qn('w:sz'), '4')
-        b.set(qn('w:space'), '0')
-        b.set(qn('w:color'), color)
-        tcB.append(b)
-    tcPr.append(tcB)
-
-
-def cell_para(cell, text, bold=False, size=9, color=None, italic=False):
-    p_ = cell.paragraphs[0]
-    p_.paragraph_format.space_before = Pt(2)
-    p_.paragraph_format.space_after = Pt(2)
-    p_.paragraph_format.line_spacing = 1.1
-    run = p_.add_run(text)
-    run.font.name = 'Arial'
-    run.font.size = Pt(size)
-    run.font.bold = bold
-    run.font.italic = italic
-    if color:
-        run.font.color.rgb = RGBColor(*color)
-
-
-def table_margins(table, top=40, bottom=40, left=80, right=80):
-    tblPr = table._tbl.tblPr
-    mar = OxmlElement('w:tblCellMar')
-    for side, val in (('top', top), ('left', left), ('bottom', bottom), ('right', right)):
-        el = OxmlElement(f'w:{side}')
-        el.set(qn('w:w'), str(val))
-        el.set(qn('w:type'), 'dxa')
-        mar.append(el)
-    tblPr.append(mar)
-
-
-def add_table(doc, rows, col_widths_cm):
-    """rows[0] = заголовок."""
-    table = doc.add_table(rows=0, cols=len(col_widths_cm))
-    table.style = 'Table Grid'
-    table.autofit = False
-    table_margins(table)
-
-    for r_idx, row_data in enumerate(rows):
-        row = table.add_row()
-        big = len(rows) > 2
-        trPr = row._tr.get_or_add_trPr()
-        cant = OxmlElement('w:cantSplit')
-        trPr.append(cant)
-        if big and r_idx == 0:
-            th = OxmlElement('w:tblHeader')
-            trPr.append(th)
-
-        glue = not big and r_idx < len(rows) - 1
-        for c_idx, (text, w) in enumerate(zip(row_data, col_widths_cm)):
-            cell = row.cells[c_idx]
-            cell.width = Cm(w)
-            set_cell_borders(cell)
-            cell.vertical_alignment = WD_ALIGN_VERTICAL.TOP
-
-            if r_idx == 0:
-                set_cell_bg(cell, HDR_BG)
-                cell_para(cell, text, bold=True, size=9, color=(0xFF, 0xFF, 0xFF))
-            else:
-                if r_idx % 2 == 0:
-                    set_cell_bg(cell, ALT_ROW)
-                if c_idx == 0:
-                    cell_para(cell, text, bold=True, size=9)
-                else:
-                    cell_para(cell, text, size=9)
-
-            if glue:
-                for par in cell.paragraphs:
-                    par.paragraph_format.keep_with_next = True
-
-    sp = doc.add_paragraph()
-    sp.paragraph_format.space_after = Pt(4)
-    sp.paragraph_format.space_before = Pt(0)
-    sp.paragraph_format.line_spacing = 1.0
-    return table
+OUT = 'D:\\AI\\ZCode\\Project\\LAMPOCHKA\\work\\docs\\LAMPOCHKA_Manual_RU.docx'
 
 
 def h1(doc, text):
-    doc.add_heading(text, level=1)
+    return ds.h1(doc, text)
 
 
 def h2(doc, text):
-    doc.add_heading(text, level=2)
+    return ds.h2(doc, text)
 
 
-def p(doc, text, italic=False, grey=False, bullet=False):
-    par = doc.add_paragraph(style='List Bullet' if bullet else None)
-    run = par.add_run(text)
-    run.font.name = 'Arial'
-    run.font.size = Pt(9.5)
-    run.font.italic = italic
-    if grey:
-        run.font.color.rgb = GREY
-    return par
+def p(doc, text, bullet=False, italic=False, grey=False):
+    return ds.p(doc, text, bullet=bullet, italic=italic, grey=grey)
 
 
 def kv_note(doc, text):
-    par = doc.add_paragraph()
-    run = par.add_run(text)
-    run.font.name = 'Arial'
-    run.font.size = Pt(9)
-    run.font.italic = True
-    run.font.color.rgb = GREY
+    return ds.kv(doc, text)
 
 
 def mono(doc, text):
-    par = doc.add_paragraph()
-    run = par.add_run(text)
-    run.font.name = 'Consolas'
-    run.font.size = Pt(9.5)
-    run.font.bold = True
-    par.paragraph_format.space_after = Pt(3)
-    return par
+    return ds.mono(doc, text)
 
 
-def add_toc_field(doc):
-    par = doc.add_paragraph()
-    run = par.add_run()
-    fld_begin = OxmlElement('w:fldChar')
-    fld_begin.set(qn('w:fldCharType'), 'begin')
-    instr = OxmlElement('w:instrText')
-    instr.set(qn('xml:space'), 'preserve')
-    instr.text = r'TOC \o "1-2" \h \z \u'
-    fld_sep = OxmlElement('w:fldChar')
-    fld_sep.set(qn('w:fldCharType'), 'separate')
-    t = OxmlElement('w:t')
-    t.text = 'Оглавление: откройте документ в Word/LibreOffice и обновите поле (F9), чтобы заполнить номера страниц.'
-    fld_sep.append(t)
-    fld_end = OxmlElement('w:fldChar')
-    fld_end.set(qn('w:fldCharType'), 'end')
-    r = run._r
-    r.append(fld_begin)
-    r.append(instr)
-    r.append(fld_sep)
-    r.append(fld_end)
-
-    br = doc.add_paragraph()
-    run_br = br.add_run()
-    pb = OxmlElement('w:br')
-    pb.set(qn('w:type'), 'page')
-    run_br._r.append(pb)
+def add_table(doc, rows, widths, sev_col=None):
+    return ds.add_table(doc, rows, widths, sev_col=sev_col)
 
 
-def add_footer_pagenum(doc):
-    footer = doc.sections[0].footer
-    par = footer.paragraphs[0]
-    par.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = par.add_run()
-    fld_begin = OxmlElement('w:fldChar')
-    fld_begin.set(qn('w:fldCharType'), 'begin')
-    instr = OxmlElement('w:instrText')
-    instr.set(qn('xml:space'), 'preserve')
-    instr.text = r'PAGE \* arabic \* MERGEFORMAT'
-    fld_end = OxmlElement('w:fldChar')
-    fld_end.set(qn('w:fldCharType'), 'end')
-    run._r.append(fld_begin)
-    run._r.append(fld_end)
-    run.font.name = 'Arial'
-    run.font.size = Pt(9)
-    run.font.color.rgb = GREY
+def _save(doc, out):
+    ds.footer(doc.sections[1], 'LAMPOCHKA')
+    ds.strip_tail(doc)
+    doc.save(out)
+    h1s = [t for t in ds.H1_REGISTRY if t.lower() not in ('содержание', 'contents')]
+    json.dump(h1s, open(out.replace('.docx', '.h1.json'), 'w', encoding='utf-8'),
+              ensure_ascii=False)
+    print('saved:', out)
 
 
-# ════════════════════════════════════════════════════════════════════════════
-# ТИТУЛ
-# ════════════════════════════════════════════════════════════════════════════
-
-title_p = doc.add_paragraph()
-title_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-title_p.paragraph_format.space_before = Pt(30)
-title_p.paragraph_format.space_after = Pt(4)
-r = title_p.add_run('LAMPOCHKA')
-r.font.name = 'Arial'; r.font.size = Pt(30); r.font.bold = True
-r.font.color.rgb = BLUE_H1
-
-title2 = doc.add_paragraph()
-title2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-title2.paragraph_format.space_after = Pt(10)
-r = title2.add_run('Руководство пользователя')
-r.font.name = 'Arial'; r.font.size = Pt(18); r.font.bold = True
-r.font.color.rgb = BLUE_H1
-
-sub = doc.add_paragraph()
-sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-sub.paragraph_format.space_after = Pt(4)
-r = sub.add_run('Управление светом для Blender')
-r.font.name = 'Arial'; r.font.size = Pt(11); r.font.color.rgb = GREY
-
-sub2 = doc.add_paragraph()
-sub2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-sub2.paragraph_format.space_after = Pt(20)
-r = sub2.add_run('Версия для Blender 4.2+ - v3.4.7')
-r.font.name = 'Arial'; r.font.size = Pt(10.5); r.font.color.rgb = GREY
+doc = ds.new_doc('LAMPOCHKA', 'Руководство пользователя', 'V3.4.7  -  BLENDER 4.2+')
 
 p(doc, 'LAMPOCHKA собирает управление всеми источниками света сцены в одну панель: '
        'список светильников с настройками прямо в строке, браузеры HDRI, IES и гобо, '
@@ -278,7 +62,7 @@ kv_note(doc, 'github.com/abyrvalg379/LAMPOCHKA')
 # ════════════════════════════════════════════════════════════════════════════
 
 h1(doc, 'Содержание')
-add_toc_field(doc)
+ds.toc_field(doc, 'Оглавление: откройте документ в Word/LibreOffice и обновите поле (F9), чтобы заполнить номера страниц.')
 
 # ════════════════════════════════════════════════════════════════════════════
 # 1. О ПРОГРАММЕ
@@ -699,6 +483,4 @@ add_table(doc, [
 
 # ── футер и сохранение ─────────────────────────────────────────────────────
 
-add_footer_pagenum(doc)
-doc.save(OUT)
-print('saved:', OUT)
+_save(doc, OUT)
