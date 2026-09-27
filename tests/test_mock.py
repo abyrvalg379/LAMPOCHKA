@@ -4,6 +4,7 @@
 import os
 import sys
 import json
+import math
 import types
 import tempfile
 import shutil
@@ -1120,6 +1121,8 @@ class SunProps:
     """Stands in for an LM_SunSettings instance."""
 
     def __init__(self, **kw):
+        self.use_sky_sync = False
+        self.kelvin_from_elevation = False
         self.__dict__.update(kw)
         self._store = {}
 
@@ -2118,6 +2121,224 @@ shutil.rmtree(pk, ignore_errors=True)
 shutil.rmtree(pk_src, ignore_errors=True)
 
 shutil.rmtree(tmp, ignore_errors=True)
+
+# ---------------------------------------------------------------- v3.5: sun extras
+# --- Kelvin from elevation
+check("sun kelvin fn: -10 deg -> 2000K",
+      abs(ns["_sun_kelvin_for_elevation"](-10.0) - 2000.0) < 1e-6)
+check("sun kelvin fn: +30 deg -> 6500K",
+      abs(ns["_sun_kelvin_for_elevation"](30.0) - 6500.0) < 1e-6)
+check("sun kelvin fn: +10 deg -> 4250K",
+      abs(ns["_sun_kelvin_for_elevation"](10.0) - 4250.0) < 1e-6)
+
+class FakeSunLightData:
+    """Plain (non-nodal) light data; the later batch-test FakeLightData
+    shadows the early one and has no color, so use a dedicated class."""
+
+    def __init__(self):
+        self.type = 'SUN'
+        self.use_nodes = False
+        self.node_tree = None
+        self.color = [1.0, 1.0, 1.0]
+
+
+sun_data3 = FakeSunLightData()
+sun_data3.color = [1.0, 1.0, 1.0]
+sun_obj3 = FakeObj('LIGHT', sun_data3, name="Sun3")
+sun_props3 = SunProps(
+    year=2026, month=6, day=21, time_hours=5.0,  # low sun
+    latitude=55.75, longitude=37.62, utc_offset=3.0,
+    north_offset=0.0, sun_distance=100.0, sun_object=sun_obj3,
+    kelvin_from_elevation=True)
+ns["lm_sun_update"](sun_props3, None)
+check("sun kelvin: color changed from author white",
+      list(sun_data3.color) != [1.0, 1.0, 1.0])
+check("sun kelvin: reddish at low elevation",
+      sun_data3.color[0] > sun_data3.color[2])
+base_raw = sun_obj3.get("lm_sun_base_data")
+check("sun kelvin: author color stored",
+      base_raw is not None and "color" in json.loads(base_raw))
+sun_props3.kelvin_from_elevation = False
+ns["lm_kelvin_from_elevation_update"](sun_props3, None)
+check("sun kelvin: toggle off restores author color",
+      list(sun_data3.color) == [1.0, 1.0, 1.0])
+check("sun kelvin: ID prop cleaned",
+      "lm_sun_base_data" not in sun_obj3)
+# second enable stores the restored color, not the kelvin-driven one
+sun_props3.kelvin_from_elevation = True
+ns["lm_sun_update"](sun_props3, None)
+sun_props3.kelvin_from_elevation = False
+ns["lm_kelvin_from_elevation_update"](sun_props3, None)
+check("sun kelvin: re-enable/disable still restores original",
+      list(sun_data3.color) == [1.0, 1.0, 1.0])
+
+# --- Sky texture sync
+class FakeSkyNodes(list):
+    def get(self, name):
+        for n in self:
+            if n.name == name:
+                return n
+        return None
+
+    def new(self, ntype):
+        n = types.SimpleNamespace(
+            type=ntype, name="Node", label="",
+            sky_type='', sun_disc=True,
+            sun_elevation=0.0, sun_rotation=0.0,
+            inputs={"Color": types.SimpleNamespace(is_linked=False)},
+            outputs=[object()])
+        self.append(n)
+        return n
+
+
+class FakeSkyLinks:
+    def __init__(self):
+        self.made = []
+
+    def new(self, out, inp):
+        self.made.append((out, inp))
+
+
+def _make_sky_world(with_sky=True, bg_linked=False):
+    nodes = FakeSkyNodes()
+    if with_sky:
+        nodes.append(types.SimpleNamespace(
+            type='TEX_SKY', name="Sky", label="",
+            sun_elevation=0.0, sun_rotation=0.0))
+    nodes.append(types.SimpleNamespace(
+        type='BACKGROUND', name="Background", label="",
+        inputs={"Color": types.SimpleNamespace(is_linked=bg_linked)}))
+    return types.SimpleNamespace(
+        use_nodes=True,
+        node_tree=types.SimpleNamespace(nodes=nodes, links=FakeSkyLinks()))
+
+
+saved_world = getattr(bpy.context.scene, "world", None)
+w = _make_sky_world(with_sky=True)
+bpy.context.scene.world = w
+ns["_sync_world_sky"](45.0, 30.0)
+sky = w.node_tree.nodes[0]
+check("sky sync: existing TEX_SKY driven (elevation rad)",
+      abs(sky.sun_elevation - math.radians(30.0)) < 1e-6)
+check("sky sync: existing TEX_SKY driven (rotation rad)",
+      abs(sky.sun_rotation - math.radians(45.0)) < 1e-6)
+
+w2 = _make_sky_world(with_sky=False, bg_linked=False)
+bpy.context.scene.world = w2
+ns["_sync_world_sky"](45.0, 30.0)
+created = [n for n in w2.node_tree.nodes if n.name == "LM Sky"]
+check("sky sync: missing sky created as 'LM Sky'",
+      len(created) == 1 and created[0].name == "LM Sky")
+check("sky sync: created node drives unlinked Background",
+      len(w2.node_tree.links.made) == 1)
+check("sky sync: created node keeps factory sky_type, disc off",
+      created[0].sky_type == '' and created[0].sun_disc is False)
+
+w3 = _make_sky_world(with_sky=False, bg_linked=True)
+bpy.context.scene.world = w3
+ns["_sync_world_sky"](10.0, 5.0)
+created3 = [n for n in w3.node_tree.nodes if n.name == "LM Sky"]
+check("sky sync: linked Background left alone",
+      len(created3) == 1 and len(w3.node_tree.links.made) == 0)
+
+w4 = types.SimpleNamespace(use_nodes=False, node_tree=None)
+bpy.context.scene.world = w4
+ns["_sync_world_sky"](10.0, 5.0)
+check("sky sync: no node world -> no crash", True)
+bpy.context.scene.world = saved_world
+
+# --- collapse toggle
+ToggleLights = ns["LM_OT_toggle_lights"]
+tl = ToggleLights()
+tl_ctx = types.SimpleNamespace(
+    scene=types.SimpleNamespace(lm_settings=types.SimpleNamespace(lights_open=True)))
+check("toggle lights: collapses", tl.execute(tl_ctx) == {'FINISHED'}
+      and tl_ctx.scene.lm_settings.lights_open is False)
+check("toggle lights: expands back", tl.execute(tl_ctx) == {'FINISHED'}
+      and tl_ctx.scene.lm_settings.lights_open is True)
+
+# ---------------------------------------------------------------- update_checker
+uc_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "..", "extension", "update_checker.py")
+uc_src = open(uc_path, encoding="utf-8").read()
+_uc = {"__name__": "lampochka_test.update_checker",
+       "__file__": uc_path, "__package__": "lampochka_test"}
+try:
+    exec(compile(uc_src, uc_path, "exec"), _uc)
+    check("update_checker: module exec without NameError", True)
+except Exception:
+    check("update_checker: module exec without NameError", False,
+          traceback.format_exc())
+    _uc = None
+
+if _uc:
+    # the mock module was never put into sys.modules; _local_version_tuple
+    # resolves the manifest through sys_modules[package].__file__
+    sys.modules.setdefault(
+        "lampochka_test",
+        types.SimpleNamespace(
+            __file__=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "..", "extension", "__init__.py")))
+    # later test sections reassign bpy.context without preferences
+    _uc_prefs = types.SimpleNamespace(
+        update_auto_check=True, update_checking=False,
+        update_result="", update_url="")
+    bpy.context = types.SimpleNamespace(
+        preferences=types.SimpleNamespace(addons={
+            "lampochka_test": types.SimpleNamespace(preferences=_uc_prefs)}))
+    check("update_checker: parse tag plain",
+          _uc["_parse_tag"]("3.5.0") == (3, 5, 0))
+    check("update_checker: parse tag v-prefix",
+          _uc["_parse_tag"]("v3.6.1") == (3, 6, 1))
+    check("update_checker: parse tag junk suffix",
+          _uc["_parse_tag"]("v4.0.0-beta") == (4, 0, 0))
+    check("update_checker: local version from manifest",
+          _uc["_local_version_tuple"]() == (3, 5, 0))
+    _uc_prefs.update_auto_check = True
+    _uc_prefs.update_checking = False
+    _uc_prefs.update_result = ""
+    _uc_prefs.update_url = ""
+    check("update_checker: empty result invalid",
+          _uc["result_is_valid"]() is False)
+    _uc_prefs.update_result = "Up to date (v3.5.0)"
+    check("update_checker: up-to-date result invalid",
+          _uc["result_is_valid"]() is False)
+    _uc_prefs.update_result = "Update available: v9.9.9"
+    check("update_checker: newer tag valid",
+          _uc["result_is_valid"]() is True)
+    _uc_prefs.update_result = "Update available: v1.0.0"
+    check("update_checker: older tag stale -> invalid",
+          _uc["result_is_valid"]() is False)
+    _uc_prefs.update_result = ""
+
+    class _Timers:
+        def __init__(self):
+            self.registered = []
+
+        def is_registered(self, fn):
+            return fn in self.registered
+
+        def register(self, fn, first_interval=0):
+            self.registered.append(fn)
+
+        def unregister(self, fn):
+            if fn in self.registered:
+                self.registered.remove(fn)
+
+    _timers = _Timers()
+    bpy.app = types.SimpleNamespace(timers=_timers,
+                                    is_job_running=lambda *a: False,
+                                    handlers=bpy.app.handlers)
+    _uc["register"]()
+    check("update_checker: register adds timer",
+          _uc["_auto_tick"] in _timers.registered)
+    check("update_checker: auto tick returns hourly interval",
+          _uc["_auto_tick"]() == 3600.0)
+    _uc["unregister"]()
+    check("update_checker: unregister removes timer",
+          _uc["_auto_tick"] not in _timers.registered)
+    check("update_checker: stamp file writes",
+          (_uc["_write_stamp"](), _uc["_last_check_age"]() is not None)[1])
 
 print("\n=== {} passed, {} failed ===".format(len(PASS), len(FAIL)))
 for name, detail in FAIL:

@@ -6,7 +6,7 @@
 
 Blender addon for managing all lights in the scene from a single panel — plus HDRI / IES / Gobo browsers, lighting setup presets, a sun helper and interactive placement.
 
-**Blender 4.2+ · Author: Maksim Kovalev**
+**Blender 4.2 LTS · 4.5 LTS · 5.2 (CI-tested) · Author: Maksim Kovalev**
 
 ---
 
@@ -167,7 +167,8 @@ LAMPOCHKA/
 
 ## Requirements
 
-Blender 4.2+
+Blender 4.2 LTS, 4.5 LTS or 5.2. A headless smoke test runs on all three
+versions (plus Windows/Linux) on every push — see `.github/workflows/smoke.yml`.
 
 ## License
 

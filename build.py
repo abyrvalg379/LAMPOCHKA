@@ -54,6 +54,7 @@ def main():
     ext_zip = dest / "lampochka_extension.zip"
     with zipfile.ZipFile(ext_zip, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(EXT / "__init__.py", "__init__.py")
+        z.write(EXT / "update_checker.py", "update_checker.py")
         z.write(EXT / "blender_manifest.toml", "blender_manifest.toml")
 
     for name in ("README.md", "README.ru.md", "LICENSE"):
@@ -99,6 +100,7 @@ def build_team(dest):
     ext_zip = dest / "lampochka_team_extension.zip"
     with zipfile.ZipFile(ext_zip, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(EXT / "__init__.py", "__init__.py")
+        z.write(EXT / "update_checker.py", "update_checker.py")
         z.write(EXT / "blender_manifest.toml", "blender_manifest.toml")
         z.write(note_dest, "TEAM_BUILD.txt")
         n = _add_library(z, "libraries")

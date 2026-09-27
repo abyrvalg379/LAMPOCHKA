@@ -26,6 +26,14 @@ from bpy.types import AddonPreferences, PropertyGroup
 from bpy.app.handlers import persistent
 from bpy_extras.io_utils import ImportHelper
 
+try:
+    from . import update_checker
+except ImportError:  # loaded as a bare module (mock tests)
+    try:
+        import update_checker
+    except ImportError:
+        update_checker = None
+
 
 def _addon_version():
     """Version for the panel header, from blender_manifest.toml."""
@@ -136,6 +144,11 @@ class LM_FavoriteSlot(PropertyGroup):
 
 class LM_SceneSettings(PropertyGroup):
     selected_index: IntProperty(name="Selected Index", default=-1)
+    lights_open: BoolProperty(
+        name="Lights",
+        default=True,
+        description="Show the light list section",
+    )
     filter_name: StringProperty(name="Filter", default="", description="Filter lights by name")
     settings_light: StringProperty(name="Settings Light", default="", description="Name of light with open settings")
     transform_open: BoolProperty(name="Transform Open", default=False)
@@ -568,9 +581,43 @@ class LM_AddonPreferences(AddonPreferences):
         name="Favorite Setups",
         description="Preset setups marked as favorites (global)",
     )
+    # Update checker — state of the last manual check
+    update_auto_check: BoolProperty(
+        name="Check for updates daily", default=True,
+        description="Silently compare the installed version with the latest "
+                    "GitHub release once a day (one anonymous request)")
+    update_checking: BoolProperty(name="Checking", default=False)
+    update_result: StringProperty(name="Update Check Result", default="")
+    update_url: StringProperty(name="Latest Release URL", default="")
 
     def draw(self, context):
         layout = self.layout
+
+        box = layout.box()
+        box.label(text="Updates", icon='WORLD')
+        box.prop(self, "update_auto_check")
+        row = box.row(align=True)
+        row.operator("light_manager.check_updates",
+                     text="Checking..." if self.update_checking else "Check for updates",
+                     icon='FILE_REFRESH')
+        if self.update_result:
+            stale_update = (self.update_result.startswith("Update available")
+                            and update_checker is not None
+                            and not update_checker.result_is_valid())
+            if self.update_result.startswith("Update available") and not stale_update:
+                box.row(align=True).operator("light_manager.open_releases",
+                                             text=self.update_result,
+                                             icon='URL')
+            else:
+                hint = box.row()
+                hint.enabled = False
+                if stale_update:
+                    hint.label(text="Up to date (%s)"
+                               % self.update_result.rsplit(":", 1)[1].strip(),
+                               icon='INFO')
+                else:
+                    hint.label(text=self.update_result, icon='INFO')
+
         layout.prop(self, "hdri_folder")
         layout.prop(self, "ies_folder")
         layout.prop(self, "gobo_folder")
@@ -739,7 +786,7 @@ def lm_use_temperature_update(self, context):
                 for link in list(inp.links):
                     if link.from_node.type == 'BLACKBODY':
                         light.node_tree.links.remove(link)
-                inp.default_value = color
+                inp.default_value = (list(color) + [1.0, 1.0])[:4]
             for node in list(light.node_tree.nodes):
                 if node.type == 'BLACKBODY' and node.name == LM_BB_NODE:
                     light.node_tree.nodes.remove(node)
@@ -915,6 +962,9 @@ def lm_sun_update(self, context):
     self["sunrise"] = rise if rise is not None else -1.0
     self["sunset"] = set_ if set_ is not None else -1.0
 
+    if self.use_sky_sync:
+        _sync_world_sky(az, el)
+
     obj = self.sun_object
     if obj is None or obj.type != 'LIGHT':
         return
@@ -929,6 +979,137 @@ def lm_sun_update(self, context):
     else:
         obj.location = direction * self.sun_distance
         obj.rotation_euler = rot
+
+    if self.kelvin_from_elevation:
+        _sun_kelvin_apply(obj, _sun_kelvin_for_elevation(el))
+
+
+def _sun_kelvin_for_elevation(el):
+    """Horizon (0°) = 2000K, rising to 6500K at 20° and above."""
+    t = max(0.0, min(el / 20.0, 1.0))
+    return 2000.0 + (6500.0 - 2000.0) * t
+
+
+LM_SUN_BB_NODE = 'LM Sun Blackbody'
+
+
+def _sun_kelvin_apply(obj, kelvin):
+    """Drive the sun light color from elevation.  First call remembers the
+    author color (plain light.color or unlinked emission colors) in an ID
+    prop together with the branch choice — the branch must stay fixed for
+    the whole run: once the blackbody is linked, _kelvin_targets() goes
+    empty and would otherwise flip the next update into the color branch."""
+    light = obj.data
+    if light is None:
+        return
+    raw = obj.get("lm_sun_base_data")
+    saved = None
+    if raw:
+        try:
+            saved = json.loads(raw)
+        except Exception:
+            saved = None
+    if not saved or "mode" not in saved:
+        targets = _kelvin_targets(light)
+        mode = "nodes" if targets else "color"
+        if mode == "nodes":
+            saved = {"mode": mode,
+                     "emissions": {node.name: list(node.inputs['Color'].default_value[:3])
+                                   for node in targets}}
+        else:
+            saved = {"mode": mode, "color": list(light.color)}
+        obj["lm_sun_base_data"] = json.dumps(saved)
+    if saved["mode"] == "nodes" and light.use_nodes and light.node_tree:
+        tree = light.node_tree
+        bb = tree.nodes.get(LM_SUN_BB_NODE)
+        if bb is None or bb.type != 'BLACKBODY':
+            bb = tree.nodes.new('ShaderNodeBlackbody')
+            bb.name = LM_SUN_BB_NODE
+            bb.label = LM_SUN_BB_NODE
+            emission = next((n for n in tree.nodes if n.type == 'EMISSION'), None)
+            if emission is not None:
+                bb.location = (emission.location.x - 200, emission.location.y)
+        for node in tree.nodes:
+            if node.type == 'EMISSION' and not node.inputs['Color'].is_linked:
+                tree.links.new(bb.outputs[0], node.inputs['Color'])
+        bb.inputs[0].default_value = kelvin
+    else:
+        light.color = kelvin_to_rgb(kelvin)
+
+
+def _sun_kelvin_restore(obj):
+    """Undo _sun_kelvin_apply: remove the blackbody node, restore colors."""
+    light = obj.data
+    raw = obj.get("lm_sun_base_data")
+    if raw is None or light is None:
+        return
+    try:
+        saved = json.loads(raw)
+    except Exception:
+        saved = None
+    if saved and saved.get("mode") == "nodes" and light.use_nodes and light.node_tree:
+        tree = light.node_tree
+        for name, color in saved.get("emissions", {}).items():
+            node = tree.nodes.get(name)
+            if node is None:
+                continue
+            inp = node.inputs['Color']
+            for link in list(inp.links):
+                if link.from_node.type == 'BLACKBODY':
+                    tree.links.remove(link)
+            inp.default_value = (list(color) + [1.0, 1.0])[:4]
+        for node in list(tree.nodes):
+            if node.type == 'BLACKBODY' and node.name == LM_SUN_BB_NODE:
+                tree.nodes.remove(node)
+    elif saved and "color" in saved:
+        light.color = saved["color"]
+    if "lm_sun_base_data" in obj:
+        del obj["lm_sun_base_data"]
+
+
+def lm_kelvin_from_elevation_update(self, context):
+    obj = self.sun_object
+    if obj is None or obj.type != 'LIGHT':
+        return
+    if self.kelvin_from_elevation:
+        lm_sun_update(self, context)
+    else:
+        _sun_kelvin_restore(obj)
+
+
+LM_SKY_NODE = 'LM Sky'
+
+
+def _sync_world_sky(az, el):
+    """Point the world's Sky Texture at the sun.  Uses the first TEX_SKY
+    node in the world tree (our 'LM Sky' preferred); if none exists, creates
+    a Nishita one and wires it into an unlinked Background."""
+    try:
+        world = bpy.context.scene.world
+        if world is None or not world.use_nodes or world.node_tree is None:
+            return
+        nt = world.node_tree
+        sky = nt.nodes.get(LM_SKY_NODE)
+        if sky is None or sky.type != 'TEX_SKY':
+            sky = next((n for n in nt.nodes if n.type == 'TEX_SKY'), None)
+        if sky is None:
+            sky = nt.nodes.new('ShaderNodeTexSky')
+            sky.name = LM_SKY_NODE
+            sky.label = LM_SKY_NODE
+            # keep the factory sky_type (NISHITA in 4.x, MULTIPLE_SCATTERING
+            # in 5.x — both expose sun_elevation/sun_rotation); only kill the
+            # disc: the scene already has a real sun lamp driving this sync
+            try:
+                sky.sun_disc = False
+            except Exception:
+                pass
+            bg = next((n for n in nt.nodes if n.type == 'BACKGROUND'), None)
+            if bg is not None and not bg.inputs['Color'].is_linked:
+                nt.links.new(sky.outputs[0], bg.inputs['Color'])
+        sky.sun_elevation = math.radians(el)
+        sky.sun_rotation = math.radians(az)
+    except Exception:
+        pass
 
 
 def _lm_sun_dir(props):
@@ -974,6 +1155,21 @@ class LM_SunSettings(PropertyGroup):
         name="Distance", min=0.1, default=100.0, unit='LENGTH',
         update=lm_sun_update,
         description="Placement of non-sun lights; sun lamps only rotate")
+    use_sky_sync: BoolProperty(
+        name="Sky Texture Sync",
+        default=False,
+        update=lm_sun_update,
+        description="Drive the world's Sky Texture (Nishita) from the sun "
+                    "position — creates one if the world has none",
+    )
+    kelvin_from_elevation: BoolProperty(
+        name="Kelvin from Elevation",
+        default=False,
+        update=lm_kelvin_from_elevation_update,
+        description="Warm the sun light near the horizon (2000K at 0°) up "
+                    "to 6500K at 20° and above; toggling off restores the "
+                    "author color",
+    )
     # read-only computed values (written by lm_sun_update)
     sun_elevation: FloatProperty(get=_sun_elev_get)
     sun_azimuth: FloatProperty(get=lambda self: self.get("sun_azimuth", 0.0))
@@ -1063,6 +1259,10 @@ class LM_PT_SunPanel(bpy.types.Panel):
                   % (sun.sun_elevation, sun.sun_azimuth))
         col.label(text="Sunrise %s   Sunset %s"
                   % (_format_hours(sun.sunrise), _format_hours(sun.sunset)))
+
+        col = layout.column(align=True)
+        col.prop(sun, "use_sky_sync")
+        col.prop(sun, "kelvin_from_elevation")
 
         box = layout.box()
         col = box.column(align=True)
@@ -3100,8 +3300,23 @@ class LM_PT_MainPanel(bpy.types.Panel):
         layout = self.layout
         settings = context.scene.lm_settings
 
+        # Update badge — only a result still newer than the installed version
+        if update_checker is not None:
+            try:
+                prefs = context.preferences.addons[__package__].preferences
+            except Exception:
+                prefs = None
+            if (prefs is not None
+                    and getattr(prefs, "update_result", "").startswith("Update available")
+                    and update_checker.result_is_valid()):
+                layout.operator("light_manager.open_releases",
+                                text=prefs.update_result, icon='WORLD')
+
         # --- Header ---
         row = layout.row(align=True)
+        row.operator("light_manager.toggle_lights", text="",
+                     icon='TRIA_DOWN' if settings.lights_open else 'TRIA_RIGHT',
+                     emboss=False)
         row.prop(settings, "filter_name", text="", icon='VIEWZOOM')
         row.operator("light_manager.cycle_select", text="",
                      icon='TRIA_LEFT').direction = -1
@@ -3114,6 +3329,9 @@ class LM_PT_MainPanel(bpy.types.Panel):
         row.operator_menu_enum("light_manager.add_light", "light_type", text="", icon='ADD')
         row.operator_menu_enum("light_manager.add_surface_light", "light_type", text="", icon='FACESEL')
         row.prop(settings, "batch_mode", text="", icon='CHECKBOX_HLT', toggle=True)
+
+        if not settings.lights_open:
+            return
 
         # --- Light list: fixed height, internal scroll. The mirror lives
         # in settings.lights_slots and is synced by the depsgraph handler
@@ -3838,6 +4056,18 @@ class LM_OT_toggle_transform(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class LM_OT_toggle_lights(bpy.types.Operator):
+    """Collapse / expand the light list section."""
+    bl_idname = "light_manager.toggle_lights"
+    bl_label = "Toggle Light List"
+    bl_options = {'REGISTER'}
+
+    def execute(self, context):
+        settings = context.scene.lm_settings
+        settings.lights_open = not settings.lights_open
+        return {'FINISHED'}
+
+
 class LM_OT_hdri_pick_folder(bpy.types.Operator, ImportHelper):
     """Pick a folder containing HDRI files."""
     bl_idname = "light_manager.hdri_pick_folder"
@@ -4014,15 +4244,16 @@ class LM_OT_hdri_clear(bpy.types.Operator):
             output = nodes.new('ShaderNodeOutputWorld')
             output.location = (0, 0)
         links.new(background.outputs['Background'], output.inputs['Surface'])
-        # "no environment": pitch black, zero strength
-        background.inputs['Color'].default_value = (0.0, 0.0, 0.0, 1.0)
-        background.inputs['Strength'].default_value = 0.0
-
         # Panel: strength back to its default, so the next Apply HDRI
-        # comes in at full strength (the world itself stays black/0)
+        # comes in at full strength.  These writes fire update callbacks
+        # (update_hdri_power stamps power into the first Background node),
+        # so they must happen BEFORE the final pitch-black write below.
         hdri = context.scene.lm_hdri
         hdri.rotation = (0.0, 0.0, 0.0)
         hdri.power = 1.0
+        # "no environment": pitch black, zero strength
+        background.inputs['Color'].default_value = (0.0, 0.0, 0.0, 1.0)
+        background.inputs['Strength'].default_value = 0.0
 
         self.report({'INFO'}, "HDRI cleared")
         return {'FINISHED'}
@@ -4221,6 +4452,7 @@ classes = (
     LM_OT_move_light,
     LM_OT_toggle_settings,
     LM_OT_toggle_transform,
+    LM_OT_toggle_lights,
     LM_OT_hdri_pick_folder,
     LM_OT_hdri_pick,
     LM_OT_hdri_apply,
@@ -4356,12 +4588,16 @@ def register():
             _presets_pcoll = previews.new()
     # Shift+RMB HDRI rotation keymap (always on, operator poll gates the toggle)
     register_shift_rmb_keymap()
+    if update_checker is not None:
+        update_checker.register()
 
 
 def unregister():
     global _hdri_pcoll, _ies_pcoll, _gobo_pcoll, _presets_pcoll
     # Remove the Shift+RMB keymap
     unregister_shift_rmb_keymap()
+    if update_checker is not None:
+        update_checker.unregister()
     # Remove sync handler
     if sync_handler in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(sync_handler)
