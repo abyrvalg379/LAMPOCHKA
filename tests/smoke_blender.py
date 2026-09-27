@@ -167,6 +167,7 @@ def st_kelvin():
 
 def st_sun_helper():
     sun = make_light("SmokeSun", 'SUN')
+    sun.data.use_nodes = True  # 4.x lamps are not nodal by default, 5.x are
     world = bpy.data.worlds.new("SmokeWorld")
     world.use_nodes = True
     scene.world = world
