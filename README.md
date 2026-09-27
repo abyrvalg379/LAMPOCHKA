@@ -4,6 +4,8 @@
 
 *Документация на русском: [README.ru.md](README.ru.md)*
 
+[![Smoke](https://github.com/abyrvalg379/LAMPOCHKA/actions/workflows/smoke.yml/badge.svg)](https://github.com/abyrvalg379/LAMPOCHKA/actions/workflows/smoke.yml)
+
 Blender addon for managing all lights in the scene from a single panel — plus HDRI / IES / Gobo browsers, lighting setup presets, a sun helper and interactive placement.
 
 **Blender 4.2 LTS · 4.5 LTS · 5.2 (CI-tested) · Author: Maksim Kovalev**
@@ -171,8 +173,8 @@ Questions, ideas and bug reports: [Discussions](https://github.com/abyrvalg379/L
 
 ## Requirements
 
-Blender 4.2 LTS, 4.5 LTS or 5.2. A headless smoke test runs on all three
-versions (plus Windows/Linux) on every push — see `.github/workflows/smoke.yml`.
+Blender 4.2 LTS, 4.5 LTS or 5.2 — all gated by the [CI smoke matrix](https://github.com/abyrvalg379/LAMPOCHKA/actions/workflows/smoke.yml)
+(Ubuntu + Windows) on every push — see `.github/workflows/smoke.yml`.
 
 ## License
 

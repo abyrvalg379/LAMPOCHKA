@@ -4,6 +4,8 @@
 
 *English documentation: [README.md](README.md)*
 
+[![Smoke](https://github.com/abyrvalg379/LAMPOCHKA/actions/workflows/smoke.yml/badge.svg)](https://github.com/abyrvalg379/LAMPOCHKA/actions/workflows/smoke.yml)
+
 Аддон Blender для управления всеми источниками света сцены из одной панели — плюс браузеры HDRI / IES / гобо, пресеты световых схем, солнечный хелпер и интерактивная расстановка.
 
 **Blender 4.2 LTS · 4.5 LTS · 5.2 (проверяется CI) · Автор: Maksim Kovalev**
@@ -171,8 +173,8 @@ LAMPOCHKA/
 
 ## Требования
 
-Blender 4.2 LTS, 4.5 LTS или 5.2. На каждый пуш гоняется headless смоук-тест
-на всех трёх версиях (плюс Windows/Linux) — см. `.github/workflows/smoke.yml`.
+Blender 4.2 LTS, 4.5 LTS или 5.2 — все три прогоняются [CI смоук-матрицей](https://github.com/abyrvalg379/LAMPOCHKA/actions/workflows/smoke.yml)
+(Ubuntu + Windows) на каждое изменение — см. `.github/workflows/smoke.yml`.
 
 ## Лицензия
 
