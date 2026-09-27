@@ -165,6 +165,10 @@ LAMPOCHKA/
     └── ROADMAP.md             ← development history & plans
 ```
 
+## Support
+
+Questions, ideas and bug reports: [Discussions](https://github.com/abyrvalg379/LAMPOCHKA/discussions).
+
 ## Requirements
 
 Blender 4.2 LTS, 4.5 LTS or 5.2. A headless smoke test runs on all three

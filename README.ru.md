@@ -165,6 +165,10 @@ LAMPOCHKA/
     └── ROADMAP.md             ← история и планы разработки
 ```
 
+## Поддержка
+
+Вопросы, идеи и баг-репорты: [Discussions](https://github.com/abyrvalg379/LAMPOCHKA/discussions).
+
 ## Требования
 
 Blender 4.2 LTS, 4.5 LTS или 5.2. На каждый пуш гоняется headless смоук-тест
