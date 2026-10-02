@@ -28,7 +28,7 @@ LIB_SOURCES = {
 LIB_EXCLUDE_DIRS = {"SP_big"}
 # already-compressed formats — storing is much faster than deflating
 STORED_EXT = {".exr", ".hdr", ".jpg", ".jpeg", ".png"}
-TEAM_NOTE = """LAMPOCHKA TEAM BUILD — внутренняя сборка не для публичной раздачи.
+TEAM_NOTE = """LAMPOCHKA TEAM BUILD — внутренняя сборка (не для публикации).
 
 Содержит библиотеки пресетов, собранные из коммерческих продуктов
 (Pro-Lighting Studio, Lumio). Использовать только внутри студии.
