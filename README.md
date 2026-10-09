@@ -35,6 +35,7 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 ### Inline Settings (via ⚙)
 - Light type, color, power
 - **Kelvin temperature (v2.3)** — toggle drives light color from blackbody temperature (1500–12000 K slider); the original color is remembered and restored on toggle off. Node lights (e.g. with an IES profile) are driven through a Blackbody node instead. Works in Cycles and EEVEE
+- **Place Offset (v3.5.1)** — distance from the surface kept by the Alt snap in placement mode (stored on the light, so presets carry it)
 - Shadow toggle + shadow size
 - **Point** — radius
 - **Sun** — angle
@@ -71,12 +72,11 @@ Instead of searching for lights in the Outliner or switching between objects, yo
 - **Strength** — environment intensity, live update
 - **Rotate: Shift+RMB** — toggle; when enabled, drag with **Shift + Right Mouse** in the viewport to spin the HDRI around Z. Ctrl+Z undoes the whole drag. The toggle is always off in a fresh session (resets on every file load) so the default navigation is never hijacked unexpectedly
 - Rotation and strength apply to the HDRI node setup even after re-applying a different HDRI
-- **Remembered folder** — the last picked HDRI folder is stored in add-on preferences and auto-filled in every new project; an individual `.blend` can still override it with its own folder
-- **Folder auto-repair (v3.3)** — if a saved folder no longer exists on disk (library moved or deleted), it is repaired on file load from preferences, then from the bundled team library. The same repair runs when you edit the folder in preferences. A dead path that cannot be repaired shows "Folder not found: …" in the panel instead of a misleading "no files" message; this applies to the HDRI, IES, Gobo and Presets browsers alike
+- **Remembered folder (v3.5.1)** — the last folder of every library (HDRI / IES / Gobo / Presets) is remembered in a small config file outside Blender and restored automatically in each new project — no re-picking after switching scenes or upgrading Blender. A path typed into the panel field is remembered exactly like a picked one; an individual `.blend` can still override it with its own folder
+- **Folder auto-repair (v3.3)** — if a saved folder no longer exists on disk (library moved or deleted), it is repaired on file load from preferences, then from the shared folder memory, then from the bundled team library. The same repair runs when you edit the folder in preferences. A dead path that cannot be repaired shows "Folder not found: …" in the panel instead of a misleading "no files" message; this applies to the HDRI, IES, Gobo and Presets browsers alike
 
 #### Where is the remembered folder stored?
-`Preferences → Add-ons / Get Extensions → LAMPOCHKA → Default HDRI Folder`.
-Picking a folder in the panel updates it automatically; you can also edit it there manually.
+In a small config file outside Blender's preferences: `%APPDATA%\LAMPOCHKA\config.json` (Windows), `~/Library/Application Support/LAMPOCHKA/config.json` (macOS) or `~/.config/lampochka/config.json` (Linux). It survives Blender upgrades and is shared by all Blender versions. The Preferences defaults still work and take priority over the remembered folders.
 
 ### Sun (v2.5)
 - Collapsible **Sun** sub-panel: aim any sun light by time of day, date and location
@@ -114,7 +114,7 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 ### Interactive Placement (v3)
 - **Cursor button** on each light row is the master switch, manual only:
   - **ON** — the light follows the cursor freely (no snapping), viewport navigation keeps working
-  - **Alt** (held) — snap the light to the surface under the cursor
+  - **Alt** (held) — snap the light to the surface under the cursor, holding the light's **Place Offset** distance (⚙ settings)
   - **G** — works as the placement operator while the button is ON: applies the current run, press again to place again; with the button OFF, G is the native Grab
   - **LMB / Enter** — apply the current run, **RMB / Esc** — reset the run to where it started
   - **Wheel** — power, **Shift + wheel** — size, **Ctrl + wheel** — depth of the movement plane
@@ -123,6 +123,7 @@ Picking a folder in the panel updates it automatically; you can also edit it the
 
 ### Light & Shadow Linking (v3)
 - **Light Linking: Pick** / **Shadow Linking: Pick** in the light's ⚙ settings (Blender 4.x / 5.x)
+- The pick buttons show how many objects are linked; the Clear buttons gray out while there is nothing to clear
 - Click objects in the viewport to link/unlink them as receivers or blockers of the light — faster than digging through outliner collections
 - Enter confirms, Esc / Right click rolls back to the state before the picking session
 - Clear Receivers / Clear Blockers buttons wipe the link assignments

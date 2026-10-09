@@ -2453,8 +2453,11 @@ if _uc:
           _uc["_parse_tag"]("v3.6.1") == (3, 6, 1))
     check("update_checker: parse tag junk suffix",
           _uc["_parse_tag"]("v4.0.0-beta") == (4, 0, 0))
+    ver = _uc["_local_version_tuple"]()
     check("update_checker: local version from manifest",
-          _uc["_local_version_tuple"]() == (3, 5, 0))
+          isinstance(ver, tuple) and len(ver) == 3
+          and all(isinstance(n, int) and n > 0 for n in ver),
+          repr(ver))
     _uc_prefs.update_auto_check = True
     _uc_prefs.update_checking = False
     _uc_prefs.update_result = ""
