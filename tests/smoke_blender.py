@@ -360,6 +360,30 @@ def st_folder_memory():
     return "folder remembered + restored from shared config"
 
 
+def st_linking():
+    # light linking helpers the panel indicator is built on
+    light = make_light("SmokeLink", 'POINT')
+    ob = bpy.data.objects.new("SmokeLinkTarget", None)
+    scene.collection.objects.link(ob)
+    expect(m._has_light_linking(light), "no light linking capability")
+    expect(m._link_toggle(light, "receiver", ob) is True, "receiver not linked")
+    expect(m._linking_count(light, "receiver") == 1, "receiver count wrong")
+    expect(m._link_toggle(light, "receiver", ob) is False, "receiver not unlinked")
+    expect(m._linking_count(light, "receiver") == 0, "count after unlink wrong")
+    m._link_toggle(light, "receiver", ob)
+    m._linking_restore(light, m._linking_snapshot(light))
+    expect(m._linking_count(light, "receiver") == 1, "snapshot/restore broken")
+    expect(m._count_suffix(2) == " (2)" and m._count_suffix(0) == "",
+           "indicator suffix broken")
+    # placement offset prop exists and persists on the light object
+    light.lm_place_offset = 0.5
+    expect(abs(light.lm_place_offset - 0.5) < 1e-6, "place offset prop broken")
+    light.lm_place_offset = 0.0
+    bpy.data.objects.remove(ob, do_unlink=True)
+    bpy.data.objects.remove(light, do_unlink=True)
+    return "link toggle/count/snapshot + place offset prop"
+
+
 def st_solo_cycle_batch():
     lights = scene_lights()
     expect(len(lights) >= 2, "need >= 2 lights")
@@ -445,6 +469,7 @@ def main():
     step("gobo_browser", st_gobo_browser)
     step("presets", st_presets)
     step("folder_memory", st_folder_memory)
+    step("linking", st_linking)
     step("solo_cycle_batch", st_solo_cycle_batch)
     step("collapse", st_collapse)
     step("update_checker", st_update_checker)

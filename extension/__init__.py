@@ -3006,6 +3006,12 @@ def _linking_count(obj, which):
     return len(coll.objects) if coll is not None else 0
 
 
+def _count_suffix(count):
+    """' (3)' for the linking pick buttons — nothing while nothing is
+    linked (zero is the default state, a number means 'linked')."""
+    return " (%d)" % count if count > 0 else ""
+
+
 class LM_OT_link_pick(bpy.types.Operator):
     """Click objects in the viewport to link/unlink them as receivers or blockers."""
     bl_idname = "light_manager.link_pick"
@@ -3216,7 +3222,10 @@ class LM_OT_place_light(bpy.types.Operator):
             if hit[0]:
                 location, normal = hit[1], hit[2]
                 self._free_dist = max(0.1, (location - origin).length)
-                self._obj.location = location + normal * 0.001
+                # hold the light at its Place Offset from the surface
+                # (0.001 minimum keeps it out of z-fighting with the wall)
+                offset = max(0.001, getattr(self._obj, "lm_place_offset", 0.0))
+                self._obj.location = location + normal * offset
                 return
         self._free_dist = max(0.1, self._free_dist * depth_factor)
         self._obj.location = origin + direction * self._free_dist
@@ -3301,11 +3310,15 @@ class LM_OT_place_light(bpy.types.Operator):
             size_key = _light_size_key(self._obj)
             size_val = getattr(self._obj.data, size_key, None) if size_key else None
             size_txt = (" (%.2f)" % size_val) if size_val is not None else " — n/a"
+            offset = getattr(self._obj, "lm_place_offset", 0.0)
+            snap_txt = "Alt — snap to surface"
+            if offset:
+                snap_txt += " (+%.2f m)" % offset
             if self._following:
                 text = ("LAMPOCHKA place: LMB/G — apply  |  RMB/Esc — reset  |  "
-                        "Alt — snap to surface  |  Wheel — power (%.0f)  |  "
+                        "%s  |  Wheel — power (%.0f)  |  "
                         "Shift+Wheel — size%s  |  Ctrl+Wheel — depth (%.1f m)"
-                        % (self._obj.data.energy, size_txt, self._free_dist))
+                        % (snap_txt, self._obj.data.energy, size_txt, self._free_dist))
             else:
                 text = "LAMPOCHKA place [armed]: G — place the light again"
         try:
@@ -3532,21 +3545,32 @@ class LM_PT_MainPanel(bpy.types.Panel):
         if obj.lm_use_temperature:
             col.prop(obj, "lm_temperature", text="Temperature")
 
+        col.separator()
+        col.prop(obj, "lm_place_offset", text="Place Offset")
+
         # Light / shadow linking (Blender 4.x)
         if _has_light_linking(obj):
             col.separator()
-            op = col.operator("light_manager.link_pick", text="Light Linking: Pick",
+            op = col.operator("light_manager.link_pick",
+                              text="Light Linking: Pick"
+                                   + _count_suffix(_linking_count(obj, "receiver")),
                               icon='EYEDROPPER')
             op.mode = 'RECEIVER'
             op.light_name = obj.name
-            op = col.operator("light_manager.link_pick", text="Shadow Linking: Pick",
+            op = col.operator("light_manager.link_pick",
+                              text="Shadow Linking: Pick"
+                                   + _count_suffix(_linking_count(obj, "blocker")),
                               icon='EYEDROPPER')
             op.mode = 'BLOCKER'
             op.light_name = obj.name
             row = col.row(align=True)
-            op = row.operator("light_manager.link_clear", text="Clear Receivers")
+            sub = row.row(align=True)
+            sub.enabled = _linking_count(obj, "receiver") > 0
+            op = sub.operator("light_manager.link_clear", text="Clear Receivers")
             op.mode = 'RECEIVER'
-            op = row.operator("light_manager.link_clear", text="Clear Blockers")
+            sub = row.row(align=True)
+            sub.enabled = _linking_count(obj, "blocker") > 0
+            op = sub.operator("light_manager.link_clear", text="Clear Blockers")
             op.mode = 'BLOCKER'
 
         col.separator()
@@ -4695,10 +4719,20 @@ def register():
         name="Place with G",
         description="Placement mode master switch (manual only). ON: the "
                     "light follows the cursor freely, Alt snaps it to "
-                    "surfaces, G applies/restarts like a transform operator, "
+                    "surfaces (holding the light's Place Offset), G "
+                    "applies/restarts like a transform operator, "
                     "wheel — power, Shift+wheel — size, Ctrl+wheel — depth. "
                     "OFF: nothing runs, G is the native Grab again",
         default=False,
+    )
+    bpy.types.Object.lm_place_offset = bpy.props.FloatProperty(
+        name="Place Offset",
+        description="Distance from the surface kept by the Alt snap in "
+                    "placement mode (panel of the light, Placement)",
+        default=0.0,
+        min=0.0,
+        soft_max=5.0,
+        subtype='DISTANCE',
     )
     bpy.types.Object.lm_temperature = bpy.props.FloatProperty(
         name="Temperature",
@@ -4802,6 +4836,10 @@ def unregister():
         pass
     try:
         del bpy.types.Object.lm_place_enable
+    except Exception:
+        pass
+    try:
+        del bpy.types.Object.lm_place_offset
     except Exception:
         pass
     for _attr in GOBO_PROP_DEFAULTS:

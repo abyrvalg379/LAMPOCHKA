@@ -501,6 +501,7 @@ check("object kelvin props added",
       hasattr(bpy.types.Object, "lm_use_temperature")
       and hasattr(bpy.types.Object, "lm_temperature"))
 check("object place toggle added", hasattr(bpy.types.Object, "lm_place_enable"))
+check("object place offset added", hasattr(bpy.types.Object, "lm_place_offset"))
 check("sync handler appended", ns["sync_handler"] in _handlers["deps"])
 check("load_post handler appended", ns["load_post_handler"] in _handlers["load"])
 check("sun frame handler appended", ns["sun_frame_handler"] in _handlers["frame"])
@@ -1060,6 +1061,10 @@ for _cls, _attr, _fn in (
 ns["_config_cache"] = None
 with open(cfg_file, "w", encoding="utf-8") as fh:
     json.dump({"last_folders": {}}, fh)
+
+# linking indicator: a number only when something is linked
+check("count suffix shows a number", ns["_count_suffix"](3) == " (3)")
+check("count suffix hides zero", ns["_count_suffix"](0) == "")
 
 # ---------------------------------------------------------------- shift+rmb rotate
 class FakeKMI:
