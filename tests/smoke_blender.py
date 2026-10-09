@@ -6,8 +6,8 @@ addon end-to-end through the same entry points the UI uses: light list
 mirror, select/settings/visibility/delete, Kelvin, Sun helper (sky sync +
 kelvin-from-elevation), HDRI / IES / Gobo browsers on generated asset files,
 preset package install -> apply -> intensity -> clear, solo/cycle/batch,
-list collapse and the update checker. Nothing here may depend on network,
-GUI or the host machine's libraries.
+list collapse, the shared-config folder memory and the update checker.
+Nothing here may depend on network, GUI or the host machine's libraries.
 
 Prerequisite: the lampochka extension is installed into a user resources
 dir pointed to by BLENDER_USER_RESOURCES (see tests/run_smoke.py).
@@ -18,6 +18,7 @@ exit on some setups, os._exit is safe everywhere.
 """
 
 import bpy
+import json
 import os
 import sys
 import tempfile
@@ -52,6 +53,12 @@ if MOD not in sys.modules:
     raise SystemExit(f"cannot enable {MOD}: {enable_info!r}")
 
 m = sys.modules[MOD]
+
+# Isolate the shared folder-memory config: the smoke must never read or
+# write the host machine's remembered library folders.
+_cfg_dir = tempfile.mkdtemp(prefix="lm_smoke_cfg_")
+m._config_path = lambda: os.path.join(_cfg_dir, "config.json")
+m._config_cache = None
 
 scene = bpy.context.scene
 
@@ -330,6 +337,29 @@ def st_presets():
     return f"package '{items[0]}' apply/intensity/rotation/clear"
 
 
+def st_folder_memory():
+    # a folder set by the user is remembered outside Blender's preferences
+    # and restored into a scene that has none
+    folder = tempfile.mkdtemp(prefix="lm_smoke_mem_")
+    scene.lm_hdri.hdri_folder = folder          # write-through fires here
+    cfg_path = m._config_path()
+    expect(os.path.isfile(cfg_path), "shared config not written")
+    with open(cfg_path, encoding="utf-8") as fh:
+        saved = json.load(fh).get("last_folders", {})
+    expect(saved.get("hdri") == folder, "config does not hold the folder")
+    prefs = bpy.context.preferences.addons[MOD].preferences
+    expect(prefs.hdri_folder == folder, "prefs default not updated")
+    # a fresh empty scene is seeded back from the memory (prefs dead here)
+    prefs.hdri_folder = "Z:/gone/hdri"
+    scene.lm_hdri.hdri_folder = ""
+    m._resolve_scene_folders()
+    expect(scene.lm_hdri.hdri_folder == folder, "folder not restored")
+    # seeding must not echo into the prefs default
+    expect(prefs.hdri_folder == "Z:/gone/hdri", "seeding echoed into prefs")
+    scene.lm_hdri.hdri_folder = ""
+    return "folder remembered + restored from shared config"
+
+
 def st_solo_cycle_batch():
     lights = scene_lights()
     expect(len(lights) >= 2, "need >= 2 lights")
@@ -390,6 +420,10 @@ def st_reload_cycle():
     expect(MOD in sys.modules, "re-enable failed")
     expect(hasattr(bpy.ops.light_manager, "toggle_lights"),
            "operators missing after reload")
+    # re-apply the shared-config isolation to the fresh module instance
+    m2 = sys.modules[MOD]
+    m2._config_path = m._config_path
+    m2._config_cache = None
     return "disable/enable clean"
 
 
@@ -410,6 +444,7 @@ def main():
     step("ies_browser", st_ies_browser)
     step("gobo_browser", st_gobo_browser)
     step("presets", st_presets)
+    step("folder_memory", st_folder_memory)
     step("solo_cycle_batch", st_solo_cycle_batch)
     step("collapse", st_collapse)
     step("update_checker", st_update_checker)

@@ -8,6 +8,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import zipfile
 
 import bpy
@@ -89,6 +90,9 @@ def sync_handler(scene):
         # keep the fixed-height light list in sync with the scene
         if hasattr(settings, "lights_slots"):
             _sync_light_slots(settings, get_scene_lights(context))
+        # keep library folders filled (addon enabled mid-session, scene
+        # switch inside one file) — no-op while every folder is alive
+        _resolve_scene_folders()
     except Exception:
         pass
 
@@ -430,10 +434,139 @@ def unregister_shift_rmb_keymap():
     _hdri_km = None
 
 
+# ---------------------------------------------------------------------------
+#  Remembered library folders — shared config outside Blender
+# ---------------------------------------------------------------------------
+
+def get_lm_prefs(context):
+    """Add-on preferences (remembered HDRI/IES folders) or None."""
+    try:
+        return context.preferences.addons[__package__].preferences
+    except KeyError:
+        return None
+
+
+def _config_path():
+    """Path of the shared config file. Deliberately OUTSIDE Blender's
+    preferences: userpref.blend is per Blender version, so remembered
+    library folders would be lost on every version upgrade — this file
+    survives upgrades and is shared by all installed versions."""
+    if os.name == "nt":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "LAMPOCHKA", "config.json")
+    if sys.platform == "darwin":
+        return os.path.expanduser(
+            "~/Library/Application Support/LAMPOCHKA/config.json")
+    return os.path.expanduser("~/.config/lampochka/config.json")
+
+
+_config_cache = None   # {"hdri": path, ...} — loaded from disk on first use
+
+
+def _config_folders():
+    """Last-used library folders from the shared config ({} on any problem).
+    Kept in a module cache: the folder resolve helper runs on every
+    depsgraph update and must not touch the disk."""
+    global _config_cache
+    if _config_cache is None:
+        folders = {}
+        try:
+            with open(_config_path(), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            raw = data.get("last_folders") if isinstance(data, dict) else None
+            if isinstance(raw, dict):
+                folders = {k: raw[k] for k in
+                           ("hdri", "ies", "gobos", "presets")
+                           if isinstance(raw.get(k), str)}
+        except Exception:
+            pass
+        _config_cache = folders
+    return _config_cache
+
+
+def _config_store_folder(key, folder):
+    """Persist one last-used folder to the shared config (best effort)."""
+    global _config_cache
+    folders = _config_folders()
+    if folders.get(key) == folder:
+        return
+    folders[key] = folder
+    try:
+        path = _config_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data = {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            pass
+        data["last_folders"] = folders
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except Exception:
+        pass
+
+
+_folder_sync_lock = False   # suppresses echo: seeding a scene must not
+                            # rewrite the config or the prefs defaults
+
+
+# where each library key lives in the preferences
+_FOLDER_PREFS_ATTR = {
+    "hdri": "hdri_folder",
+    "ies": "ies_folder",
+    "gobos": "gobo_folder",
+    "presets": "presets_folder",
+}
+
+
+def _remember_folder(key, folder):
+    """A library folder was set by the user (folder picker or typed into
+    the panel field): remember it in the shared config and in the
+    preferences. Alive folders only — typing a not-yet-mounted path must
+    not rewrite the defaults nor trigger a folder repair."""
+    global _folder_sync_lock
+    if _folder_sync_lock or not folder:
+        return
+    _config_store_folder(key, folder)
+    if not os.path.isdir(folder):
+        return
+    prefs = get_lm_prefs(bpy.context)
+    if prefs is None:
+        return
+    prefs_attr = _FOLDER_PREFS_ATTR[key]
+    if getattr(prefs, prefs_attr, "") == folder:
+        return
+    _folder_sync_lock = True
+    try:
+        setattr(prefs, prefs_attr, folder)  # _on_pref_* -> resolve (guarded)
+    finally:
+        _folder_sync_lock = False
+
+
+def _on_scene_hdri_folder(self, context):
+    _remember_folder("hdri", self.hdri_folder)
+
+
+def _on_scene_ies_folder(self, context):
+    _remember_folder("ies", self.ies_folder)
+
+
+def _on_scene_gobo_folder(self, context):
+    _remember_folder("gobos", self.gobo_folder)
+
+
+def _on_scene_preset_folder(self, context):
+    _remember_folder("presets", self.preset_folder)
+
+
 class LM_HDRISettings(PropertyGroup):
     hdri_folder: StringProperty(
         name="HDRI Folder",
         subtype='DIR_PATH',
+        update=_on_scene_hdri_folder,
         description="Folder containing .exr / .hdr files",
     )
     selected_hdri: EnumProperty(
@@ -482,14 +615,6 @@ class LM_HDRISettings(PropertyGroup):
     )
 
 
-def get_lm_prefs(context):
-    """Add-on preferences (remembered HDRI/IES folders) or None."""
-    try:
-        return context.preferences.addons[__package__].preferences
-    except KeyError:
-        return None
-
-
 _FOLDER_CHAIN = (
     # (scene group, scene attr, prefs attr, bundled subfolder)
     ("lm_hdri", "hdri_folder", "hdri_folder", "hdri"),
@@ -509,13 +634,18 @@ def _folder_label(folder):
 def _resolve_scene_folders():
     """Scene library folders: a live saved folder always wins; an empty or
     dead one (library moved / deleted) falls back to preferences, then to
-    the library bundled with team builds. A dead path is kept when nothing
-    live is available — the panel then says 'Folder not found'."""
+    the last folder remembered in the shared config file, then to the
+    library bundled with team builds. A dead path is kept when nothing
+    live is available — the panel then says 'Folder not found'. Seeding
+    writes are guarded so that filling a scene from the config does not
+    echo back into the config nor overwrite explicit defaults."""
+    global _folder_sync_lock
     try:
         scene = getattr(bpy.context, "scene", None)
         if scene is None:
             return
         prefs = get_lm_prefs(bpy.context)
+        folders = _config_folders()
         for group, scene_attr, prefs_attr, sub in _FOLDER_CHAIN:
             props = getattr(scene, group, None)
             if props is None:
@@ -524,10 +654,15 @@ def _resolve_scene_folders():
             if current and os.path.isdir(current):
                 continue
             pref_value = getattr(prefs, prefs_attr, "") if prefs is not None else ""
-            for candidate in (pref_value, _bundled_dir(sub)):
-                if candidate and os.path.isdir(candidate):
-                    setattr(props, scene_attr, candidate)
-                    break
+            _folder_sync_lock = True
+            try:
+                for candidate in (pref_value, folders.get(sub, ""),
+                                  _bundled_dir(sub)):
+                    if candidate and os.path.isdir(candidate):
+                        setattr(props, scene_attr, candidate)
+                        break
+            finally:
+                _folder_sync_lock = False
     except Exception:
         pass
 
@@ -647,8 +782,8 @@ class LM_AddonPreferences(AddonPreferences):
 
 @persistent
 def load_post_handler(dummy):
-    """Seed empty scene library folders from preferences and repair saved
-    folders that no longer exist on disk."""
+    """Seed empty scene library folders from preferences / the shared
+    config and repair saved folders that no longer exist on disk."""
     try:
         context = bpy.context
         scene = getattr(context, "scene", None)
@@ -859,6 +994,7 @@ class LM_IESSettings(PropertyGroup):
     ies_folder: StringProperty(
         name="IES Folder",
         subtype='DIR_PATH',
+        update=_on_scene_ies_folder,
         description="Folder containing .ies files",
     )
     selected_ies: EnumProperty(
@@ -1395,6 +1531,7 @@ class LM_GoboSettings(PropertyGroup):
     gobo_folder: StringProperty(
         name="Gobo Folder",
         subtype='DIR_PATH',
+        update=_on_scene_gobo_folder,
         description="Folder containing gobo textures",
     )
     selected_gobo: EnumProperty(
@@ -2163,6 +2300,7 @@ class LM_PresetSettings(PropertyGroup):
     preset_folder: StringProperty(
         name="Presets Folder",
         subtype='DIR_PATH',
+        update=_on_scene_preset_folder,
         description="Folder containing light setup packages "
                     "(.blend files, installed from zip)",
     )
@@ -4511,6 +4649,11 @@ def register():
                 and hasattr(_scene.lm_settings, "lights_slots")):
             _sync_light_slots(_scene.lm_settings,
                               [o for o in _scene.objects if o.type == 'LIGHT'])
+    except Exception:
+        pass
+    # Same for library folders when enabled on an already-open file
+    try:
+        _resolve_scene_folders()
     except Exception:
         pass
     # Per-object Kelvin controls (stored as ID props on the light object)

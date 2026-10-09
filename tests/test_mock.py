@@ -291,7 +291,7 @@ bpy.types.AddonPreferences = type("AddonPreferences", (), {})
 bpy.types.UIList = type("UIList", (), {})
 
 bpy.props = types.ModuleType("bpy.props")
-bpy.props.StringProperty = lambda **kw: None
+bpy.props.StringProperty = lambda **kw: kw          # keep kwargs for wiring tests
 bpy.props.IntProperty = lambda **kw: None
 bpy.props.BoolProperty = lambda **kw: kw
 bpy.props.FloatProperty = lambda **kw: None
@@ -391,6 +391,12 @@ except Exception:
 
 LM_HDRISettings = ns["LM_HDRISettings"]
 hdri_enum_items = ns["hdri_enum_items"]
+
+# shared-config isolation: the folder-memory tests must never touch the
+# host machine's real %APPDATA%/LAMPOCHKA config
+_cfg_dir = tempfile.mkdtemp(prefix="lampochka_mock_cfg_")
+ns["_config_path"] = lambda: os.path.join(_cfg_dir, "config.json")
+ns["_config_cache"] = None
 
 # enum callback wired as items= (py3.14: __annotations__ is lazy via
 # __annotate__, py3.11/Blender: eager in __dict__ — __annotations__ covers both)
@@ -948,6 +954,112 @@ bpy.context = types.SimpleNamespace(
     scene=types.SimpleNamespace(), preferences=bpy.context.preferences)
 ns["load_post_handler"](None)
 check("load_post without lm_hdri -> no crash", True)
+
+# ---------------------------------------------------------------- shared config (folder memory)
+# context back to the main scene for the remember tests
+bpy.context = types.SimpleNamespace(
+    scene=_scene,
+    preferences=types.SimpleNamespace(addons={
+        "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
+cfg_file = ns["_config_path"]()
+if os.path.isfile(cfg_file):
+    os.remove(cfg_file)
+ns["_config_cache"] = None
+hdri_lib = os.path.join(tmp, "cfg_hdri_lib")
+os.makedirs(hdri_lib, exist_ok=True)
+
+# a live folder set by the user is remembered in the config AND the prefs
+_prefs.hdri_folder = ""
+ns["_remember_folder"]("hdri", hdri_lib)
+check("remember writes config file", os.path.isfile(cfg_file))
+with open(cfg_file, encoding="utf-8") as fh:
+    saved = json.load(fh).get("last_folders", {})
+check("remember stores folder under hdri key", saved.get("hdri") == hdri_lib)
+check("remember updates prefs", _prefs.hdri_folder == hdri_lib)
+
+# a dead folder goes to the config but not to the prefs
+_prefs.hdri_folder = ""
+ns["_remember_folder"]("hdri", "Z:/not/mounted/yet")
+with open(cfg_file, encoding="utf-8") as fh:
+    saved = json.load(fh).get("last_folders", {})
+check("remember keeps dead folder in config",
+      saved.get("hdri") == "Z:/not/mounted/yet")
+check("remember does not write dead folder to prefs", _prefs.hdri_folder == "")
+
+# an empty folder is ignored
+before = open(cfg_file, encoding="utf-8").read()
+ns["_remember_folder"]("hdri", "")
+check("remember ignores empty folder",
+      open(cfg_file, encoding="utf-8").read() == before)
+
+# the sync lock suppresses remember entirely (seeding must not echo)
+ns["_folder_sync_lock"] = True
+try:
+    ns["_remember_folder"]("hdri", hdri_lib)
+    check("remember respects the sync lock", _prefs.hdri_folder == "")
+finally:
+    ns["_folder_sync_lock"] = False
+
+# a corrupt config file reads as empty instead of crashing
+with open(cfg_file, "w", encoding="utf-8") as fh:
+    fh.write("{not json")
+ns["_config_cache"] = None
+check("corrupt config reads as empty", ns["_config_folders"]() == {})
+
+# resolve chain: empty scene seeds from the config when prefs is empty
+ns["_config_cache"] = {"hdri": hdri_lib}
+_prefs.hdri_folder = ""
+cfg_scene = types.SimpleNamespace(
+    lm_hdri=types.SimpleNamespace(hdri_folder=""))
+bpy.context = types.SimpleNamespace(
+    scene=cfg_scene,
+    preferences=types.SimpleNamespace(addons={
+        "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
+ns["_resolve_scene_folders"]()
+check("resolve seeds empty scene from config",
+      cfg_scene.lm_hdri.hdri_folder == hdri_lib)
+check("seeding does not echo into prefs", _prefs.hdri_folder == "")
+
+# a live prefs default beats the config
+_prefs.hdri_folder = expected
+cfg_scene2 = types.SimpleNamespace(
+    lm_hdri=types.SimpleNamespace(hdri_folder=""))
+bpy.context = types.SimpleNamespace(
+    scene=cfg_scene2,
+    preferences=types.SimpleNamespace(addons={
+        "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
+ns["_resolve_scene_folders"]()
+check("resolve prefers prefs over config",
+      cfg_scene2.lm_hdri.hdri_folder == expected)
+
+# dead scene folder + dead prefs + live config -> repair from the config
+_prefs.hdri_folder = "Z:/also/gone"
+cfg_scene3 = types.SimpleNamespace(
+    lm_hdri=types.SimpleNamespace(hdri_folder="Z:/gone/library"))
+bpy.context = types.SimpleNamespace(
+    scene=cfg_scene3,
+    preferences=types.SimpleNamespace(addons={
+        "lampochka_test": types.SimpleNamespace(preferences=_prefs)}))
+ns["_resolve_scene_folders"]()
+check("resolve repairs dead scene folder from config",
+      cfg_scene3.lm_hdri.hdri_folder == hdri_lib)
+
+# all four scene folder props carry their update callback
+for _cls, _attr, _fn in (
+        ("LM_HDRISettings", "hdri_folder", "_on_scene_hdri_folder"),
+        ("LM_IESSettings", "ies_folder", "_on_scene_ies_folder"),
+        ("LM_GoboSettings", "gobo_folder", "_on_scene_gobo_folder"),
+        ("LM_PresetSettings", "preset_folder", "_on_scene_preset_folder")):
+    _anns = ns[_cls].__annotations__
+    check("%s update callback wired" % _attr,
+          isinstance(_anns.get(_attr), dict)
+          and _anns[_attr].get("update") is ns[_fn],
+          repr(_anns.get(_attr))[:120])
+
+# restore the shared-config state for any later test
+ns["_config_cache"] = None
+with open(cfg_file, "w", encoding="utf-8") as fh:
+    json.dump({"last_folders": {}}, fh)
 
 # ---------------------------------------------------------------- shift+rmb rotate
 class FakeKMI:
