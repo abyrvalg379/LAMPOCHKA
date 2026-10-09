@@ -3544,21 +3544,27 @@ class LM_PT_MainPanel(bpy.types.Panel):
         split = _settings_light_pos(settings)
         if split >= 0:
             # settings open: the list splits around the settings block so
-            # it drops down straight under the configured light's row
+            # it drops down straight under the configured light's row.
+            # Fresh list_ids for the halves: the widget remembers its
+            # dragged height per list_id, and "lm_lights" carries the
+            # weeks-old 8-row state that would punch an empty gap above
+            # the settings block.
             above = split + 1
-            layout.template_list("LM_UL_Lights", "lm_lights",
+            above_rows = min(above, 8)
+            layout.template_list("LM_UL_Lights", "lm_lights_above",
                                  settings, "lights_slots",
                                  settings, "selected_index",
-                                 rows=min(above, 8), maxrows=8)
+                                 rows=above_rows, maxrows=above_rows)
             obj = bpy.data.objects.get(settings.settings_light)
             if obj is not None and obj.type == 'LIGHT':
                 self._draw_settings(context, layout, obj)
             below = len(settings.lights_slots) - above
             if below > 0:
+                below_rows = min(below, 8)
                 layout.template_list("LM_UL_LightsBelow", "lm_lights_below",
                                      settings, "lights_slots",
                                      settings, "selected_index",
-                                     rows=min(below, 8), maxrows=8)
+                                     rows=below_rows, maxrows=below_rows)
         else:
             layout.template_list("LM_UL_Lights", "lm_lights",
                                  settings, "lights_slots",
