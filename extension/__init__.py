@@ -3370,6 +3370,18 @@ def get_light_icon(light):
 #  Panel
 # ---------------------------------------------------------------------------
 
+def _settings_light_pos(settings):
+    """Index in lights_slots of the light whose settings are open, -1 when
+    nothing is open (or the name went dead)."""
+    name = settings.settings_light
+    if not name:
+        return -1
+    for i, slot in enumerate(settings.lights_slots):
+        if slot.name == name:
+            return i
+    return -1
+
+
 class LM_UL_Lights(bpy.types.UIList):
     """Fixed-height light list: rows never change with the scene, so the
     panel size stays stable while presets swap lights in and out."""
@@ -3435,6 +3447,30 @@ class LM_UL_Lights(bpy.types.UIList):
             for i, slot in enumerate(data.lights_slots):
                 if needle not in slot.name.lower():
                     flt[i] = 0
+        # while a settings block is open this list draws only the rows
+        # ABOVE it — LM_UL_LightsBelow takes the rest
+        split = _settings_light_pos(settings)
+        if split >= 0:
+            for i in range(split + 1, len(flt)):
+                flt[i] = 0
+        return flt, []
+
+
+class LM_UL_LightsBelow(LM_UL_Lights):
+    """The rows BELOW the open settings block of the split light list
+    (same row drawing, only the filter differs)."""
+
+    def filter_items(self, context, data, propname):
+        settings = data
+        flt = [0] * len(data.lights_slots)
+        split = _settings_light_pos(settings)
+        if split < 0:
+            return flt, []
+        needle = settings.filter_name.strip().lower()
+        for i in range(split + 1, len(flt)):
+            flt[i] = self.bitflag_filter_item
+            if needle and needle not in data.lights_slots[i].name.lower():
+                flt[i] = 0
         return flt, []
 
 
@@ -3490,10 +3526,34 @@ class LM_PT_MainPanel(bpy.types.Panel):
         if not settings.lights_slots and get_scene_lights(context):
             layout.label(text="No lights", icon='INFO')
             return
-        layout.template_list("LM_UL_Lights", "lm_lights",
-                             settings, "lights_slots",
-                             settings, "selected_index",
-                             rows=8, maxrows=8)
+        split = _settings_light_pos(settings)
+        if split >= 0:
+            # settings open: the list splits around the settings block so
+            # it drops down straight under the configured light's row
+            above = split + 1
+            layout.template_list("LM_UL_Lights", "lm_lights",
+                                 settings, "lights_slots",
+                                 settings, "selected_index",
+                                 rows=min(above, 8), maxrows=8)
+            obj = bpy.data.objects.get(settings.settings_light)
+            if obj is not None and obj.type == 'LIGHT':
+                self._draw_settings(context, layout, obj)
+            below = len(settings.lights_slots) - above
+            if below > 0:
+                layout.template_list("LM_UL_LightsBelow", "lm_lights_below",
+                                     settings, "lights_slots",
+                                     settings, "selected_index",
+                                     rows=min(below, 8), maxrows=8)
+        else:
+            layout.template_list("LM_UL_Lights", "lm_lights",
+                                 settings, "lights_slots",
+                                 settings, "selected_index",
+                                 rows=8, maxrows=8)
+            if settings.settings_light:
+                # name not (yet) in the mirror — bottom draw like pre-3.4
+                obj = bpy.data.objects.get(settings.settings_light)
+                if obj is not None and obj.type == 'LIGHT':
+                    self._draw_settings(context, layout, obj)
 
         # Batch group panel
         batch = _batch_lights(context)
@@ -3510,12 +3570,8 @@ class LM_PT_MainPanel(bpy.types.Panel):
                 box.operator("light_manager.batch_clear",
                              text="Clear Batch", icon='X')
 
-        # Settings of the light whose gear is pressed — drawn below the
-        # list so its height never disturbs the fixed-size list.
-        if settings.settings_light:
-            obj = bpy.data.objects.get(settings.settings_light)
-            if obj is not None and obj.type == 'LIGHT':
-                self._draw_settings(context, layout, obj)
+        # Settings of the light whose gear is pressed live INSIDE the list
+        # (split template lists around the block) — see the draw() above.
 
     def _draw_settings(self, context, layout, obj):
         light = obj.data
@@ -4204,6 +4260,12 @@ class LM_OT_toggle_settings(bpy.types.Operator):
             settings.settings_light = ""
         else:
             settings.settings_light = self.light_name
+            # opening also selects: the split list keeps the highlighted
+            # row inside the upper half, right above the settings block
+            for idx, ob in enumerate(get_scene_lights(context)):
+                if ob.name == self.light_name:
+                    settings.selected_index = idx
+                    break
         return {'FINISHED'}
 
 
@@ -4646,6 +4708,7 @@ classes = (
     LM_OT_place_light,
     LM_OT_sun_preset,
     LM_UL_Lights,
+    LM_UL_LightsBelow,
     LM_PT_MainPanel,
     LM_PT_HDRIPanel,
     LM_PT_IESPanel,

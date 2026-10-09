@@ -1066,6 +1066,49 @@ with open(cfg_file, "w", encoding="utf-8") as fh:
 check("count suffix shows a number", ns["_count_suffix"](3) == " (3)")
 check("count suffix hides zero", ns["_count_suffix"](0) == "")
 
+# ---------------------------------------------------------------- split light list
+class _Slot:
+    def __init__(self, name):
+        self.name = name
+
+
+ul_above = ns["LM_UL_Lights"]()
+ul_above.bitflag_filter_item = 1
+ul_below = ns["LM_UL_LightsBelow"]()
+ul_below.bitflag_filter_item = 1
+_slot_list = [_Slot("Key"), _Slot("Fill"), _Slot("Rim"), _Slot("Back")]
+
+
+def _split_settings(light="", needle=""):
+    return types.SimpleNamespace(lights_slots=_slot_list,
+                                 filter_name=needle,
+                                 settings_light=light)
+
+
+SHOW = ul_above.bitflag_filter_item
+cfg = _split_settings("Fill")
+flt_a, _ = ns["LM_UL_Lights"].filter_items(ul_above, None, cfg, "lights_slots")
+flt_b, _ = ns["LM_UL_LightsBelow"].filter_items(ul_below, None, cfg, "lights_slots")
+check("split above holds rows up to settings", flt_a == [SHOW, SHOW, 0, 0])
+check("split below holds the rest", flt_b == [0, 0, SHOW, SHOW])
+
+cfg = _split_settings()
+flt_a, _ = ns["LM_UL_Lights"].filter_items(ul_above, None, cfg, "lights_slots")
+flt_b, _ = ns["LM_UL_LightsBelow"].filter_items(ul_below, None, cfg, "lights_slots")
+check("closed settings: full list above", flt_a == [SHOW] * 4)
+check("closed settings: below empty", flt_b == [0] * 4)
+
+cfg = _split_settings("Rim", "i")
+flt_a, _ = ns["LM_UL_Lights"].filter_items(ul_above, None, cfg, "lights_slots")
+flt_b, _ = ns["LM_UL_LightsBelow"].filter_items(ul_below, None, cfg, "lights_slots")
+check("split + name filter above", flt_a == [0, SHOW, SHOW, 0])
+check("split + name filter below", flt_b == [0, 0, 0, 0])
+
+check("settings pos found", ns["_settings_light_pos"](_split_settings("Rim")) == 2)
+check("settings pos closed", ns["_settings_light_pos"](_split_settings()) == -1)
+check("settings pos dead name",
+      ns["_settings_light_pos"](_split_settings("Gone")) == -1)
+
 # ---------------------------------------------------------------- shift+rmb rotate
 class FakeKMI:
     def __init__(self, idname, ktype, value, shift):
@@ -1859,7 +1902,8 @@ mirror = FakeSlots()
 mirror.items = [FakeSlot(), FakeSlot()]
 mirror.items[0].name = "Key"
 mirror.items[1].name = "Rim"
-fake_settings_mirror = types.SimpleNamespace(lights_slots=mirror)
+fake_settings_mirror = types.SimpleNamespace(lights_slots=mirror,
+                                             settings_light="")
 keep = list(mirror.items)
 same = _sync_slots(fake_settings_mirror,
                    [types.SimpleNamespace(name="Key"),
