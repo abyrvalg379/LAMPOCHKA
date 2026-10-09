@@ -3382,61 +3382,71 @@ def _settings_light_pos(settings):
     return -1
 
 
+def _draw_light_list_row(context, layout, data, item, index):
+    """One row of the light list. A module function shared by the two list
+    classes — UIList subclasses MUST NOT derive from each other here:
+    registering a derived UIList corrupts the parent's RNA type (the rows
+    then draw empty and bpy.types access raises 'subtype could not be
+    generated')."""
+    settings = data
+    obj = context.scene.objects.get(item.name) if item.name else None
+    if obj is None or obj.type != 'LIGHT':
+        layout.label(text=item.name or "?", icon='LIGHT')
+        return
+    light = obj.data
+    is_selected = (index == settings.selected_index)
+    settings_open = settings.settings_light == obj.name
+
+    row = layout.row(align=True)
+
+    # Name: click to select, or batch add/remove in batch mode
+    sub = row.row(align=True)
+    sub.active = is_selected or bool(obj.get("lm_batch"))
+    if settings.batch_mode:
+        op = sub.operator("light_manager.batch_toggle", text=obj.name,
+                          icon=get_light_icon(light),
+                          depress=bool(obj.get("lm_batch")))
+        op.light_name = obj.name
+    else:
+        sub.operator("light_manager.select_light", text=obj.name,
+                     icon=get_light_icon(light)).index = index
+
+    # Gear (click to open settings)
+    op = row.operator("light_manager.toggle_settings", text="",
+                      icon='PREFERENCES', depress=settings_open)
+    op.light_name = obj.name
+
+    # Placement mode: pressed — the light follows the cursor
+    op = row.operator("light_manager.place_toggle", text="", icon='CURSOR',
+                      depress=bool(getattr(obj, "lm_place_enable", False)))
+    op.light_name = obj.name
+
+    # Solo: isolate this light
+    op = row.operator("light_manager.solo_light", text="",
+                      icon='SOLO_ON',
+                      depress=bool(obj.get("lm_solo_active")))
+    op.light_name = obj.name
+
+    # Visibility icons (operators)
+    op = row.operator("light_manager.toggle_visibility", text="",
+                      icon='HIDE_OFF' if not obj.hide_viewport else 'HIDE_ON')
+    op.index = index
+    op = row.operator("light_manager.toggle_render", text="",
+                      icon='RESTRICT_RENDER_OFF' if not obj.hide_render
+                      else 'RESTRICT_RENDER_ON')
+    op.index = index
+    # Delete this light (same trash button as in the settings)
+    op = row.operator("light_manager.delete_light_row", text="", icon='TRASH')
+    op.index = index
+
+
 class LM_UL_Lights(bpy.types.UIList):
     """Fixed-height light list: rows never change with the scene, so the
     panel size stays stable while presets swap lights in and out."""
 
     def draw_item(self, context, layout, data, item, icon, active_data,
                   active_propname, index=0, flt_flag=0):
-        settings = data
-        obj = context.scene.objects.get(item.name) if item.name else None
-        if obj is None or obj.type != 'LIGHT':
-            layout.label(text=item.name or "?", icon='LIGHT')
-            return
-        light = obj.data
-        is_selected = (index == settings.selected_index)
-        settings_open = settings.settings_light == obj.name
-
-        row = layout.row(align=True)
-
-        # Name: click to select, or batch add/remove in batch mode
-        sub = row.row(align=True)
-        sub.active = is_selected or bool(obj.get("lm_batch"))
-        if settings.batch_mode:
-            op = sub.operator("light_manager.batch_toggle", text=obj.name,
-                              icon=get_light_icon(light),
-                              depress=bool(obj.get("lm_batch")))
-            op.light_name = obj.name
-        else:
-            sub.operator("light_manager.select_light", text=obj.name,
-                         icon=get_light_icon(light)).index = index
-
-        # Gear (click to open settings)
-        op = row.operator("light_manager.toggle_settings", text="",
-                          icon='PREFERENCES', depress=settings_open)
-        op.light_name = obj.name
-
-        # Placement mode: pressed — the light follows the cursor
-        op = row.operator("light_manager.place_toggle", text="", icon='CURSOR',
-                          depress=bool(getattr(obj, "lm_place_enable", False)))
-        op.light_name = obj.name
-
-        # Solo: isolate this light
-        op = row.operator("light_manager.solo_light", text="",
-                          icon='SOLO_ON',
-                          depress=bool(obj.get("lm_solo_active")))
-        op.light_name = obj.name
-
-        # Visibility icons (operators)
-        op = row.operator("light_manager.toggle_visibility", text="",
-                          icon='HIDE_OFF' if not obj.hide_viewport else 'HIDE_ON')
-        op.index = index
-        op = row.operator("light_manager.toggle_render", text="",
-                          icon='RESTRICT_RENDER_OFF' if not obj.hide_render else 'RESTRICT_RENDER_ON')
-        op.index = index
-        # Delete this light (same trash button as in the settings)
-        op = row.operator("light_manager.delete_light_row", text="", icon='TRASH')
-        op.index = index
+        _draw_light_list_row(context, layout, data, item, index)
 
     def filter_items(self, context, data, propname):
         settings = data
@@ -3456,9 +3466,14 @@ class LM_UL_Lights(bpy.types.UIList):
         return flt, []
 
 
-class LM_UL_LightsBelow(LM_UL_Lights):
-    """The rows BELOW the open settings block of the split light list
-    (same row drawing, only the filter differs)."""
+class LM_UL_LightsBelow(bpy.types.UIList):
+    """The rows BELOW the open settings block of the split light list.
+    Deliberately a SIBLING of LM_UL_Lights, not a subclass — see the
+    RNA note in _draw_light_list_row."""
+
+    def draw_item(self, context, layout, data, item, icon, active_data,
+                  active_propname, index=0, flt_flag=0):
+        _draw_light_list_row(context, layout, data, item, index)
 
     def filter_items(self, context, data, propname):
         settings = data
